@@ -174,24 +174,11 @@ async function open({
         }
     }
 
-    // Drop a workspace's env. Its pipelines are removed FIRST: okdb's
-    // removeEnvironment leaves the member engines in the in-process engine
-    // registry, so re-creating the same workspace later in this process would
-    // fail with "Engine already exists" (repro: test/okdb-repro/
-    // recreate-env-pipeline.js). Removing them through the pipeline API
-    // uninstalls them properly.
+    // Drop a workspace's env — removeEnvironment takes its pipelines, engines
+    // and vectors with it.
     async function dropEnv(id, store = null) {
         const env = store ? store.env : await envOf(id);
         if (!env) return false;
-        try {
-            for (const { key, value } of (await env.pipelines.listRecords()) || []) {
-                await env.pipelines.remove(String((value && value.name) || key)).catch((err) => {
-                    L.warn(`[okcode] removing pipeline ${key} of ${id}: ${err.message}`);
-                });
-            }
-        } catch {
-            /* no pipelines */
-        }
         if (store) await store.drop();
         else {
             try {
@@ -240,38 +227,6 @@ async function open({
             p.record = { ...p.record, dims: sp.dims };
             if (p.profile) p.profile = { ...p.profile, dims: sp.dims };
             await persistProfile(p.record);
-        }
-    }
-
-    // Retry what an indexer failed before this process could serve it. okdb
-    // boots a workspace env's indexers inside db.open() — before openStore
-    // registers the resolvers — and a drain that reaches the resolved field
-    // then marks each doc FAILED for good (repro: test/okdb-repro/
-    // durable-rebuild-cross-process.js, issue 2). Only where the indexer runs.
-    // A drain already in flight when the resolver arrived can still fail its
-    // batch AFTER the first pass, so a second pass follows that drain, in the
-    // background (never awaited: it may be a whole re-embed).
-    let closed = false;
-    async function retryFailed(store) {
-        const retryAll = async (idx, pipeline) => {
-            try {
-                for (let i = 0; i < 100 && !closed; i++) {
-                    const r = await idx.retryFailed({ limit: 1000 });
-                    if (!r || !(r.retried >= 1000)) break;
-                }
-            } catch (err) {
-                if (!closed) L.warn(`[okcode] retrying failed embeddings of ${pipeline}: ${err.message}`);
-            }
-        };
-        for (const sp of await store.profiles()) {
-            if (!sp.pipeline) continue;
-            const idx = db.embeddings.indexer(`${store.envName}:${sp.pipeline}`);
-            if (!idx || typeof idx.retryFailed !== 'function') continue;
-            await retryAll(idx, sp.pipeline);
-            Promise.resolve()
-                .then(() => idx.flush())
-                .then(() => !closed && retryAll(idx, sp.pipeline))
-                .catch(() => {});
         }
     }
 
@@ -330,7 +285,6 @@ async function open({
         const r = await ws.refresh();
         await regPatch(id, { lastSync: Date.now(), lastScan: syncResult(id, r, Date.now() - t0) });
         await learnDims(store);
-        await retryFailed(store);
         return ws;
     }
 
@@ -663,27 +617,9 @@ async function open({
         return { name, removed };
     }
 
-    // Remove a pipeline AND its vectors. okdb's pipeline removal uninstalls
-    // the member engines (and the indexer's doc-status rows) but leaves the
-    // `vec:<pipeline>` rows in the per-type env (repro: test/okdb-repro/
-    // pipeline-remove-keeps-vectors.js) — so the pipeline is stopped (no live
-    // indexer re-embeds behind us), its vectors dropped through the durable
-    // rebuild (row by row, the way search views learn of removals), and only
-    // then removed.
+    // Remove a pipeline: okdb drops its engines, vectors and doc status.
     async function dropPipeline(env, pipeline) {
-        const scoped = `${env.name}:${pipeline}`;
-        await env.pipelines.stop(pipeline).catch(() => {});
-        try {
-            await db.embeddings.durableRebuild(scoped);
-        } catch (err) {
-            L.warn(`[okcode] dropping vectors of ${scoped}: ${err.message}`);
-        }
         await env.pipelines.remove(pipeline);
-        try {
-            if (db.embeddings._stopLocalView) await db.embeddings._stopLocalView(scoped);
-        } catch {
-            /* no local view */
-        }
     }
 
     async function compare(id, query, names = null, { limit = 8, text = false } = {}) {
@@ -698,7 +634,6 @@ async function open({
     }
 
     async function close() {
-        closed = true;
         await Promise.all([...pendingWrites]);
         for (const o of opened.values()) await o.ws.close().catch(() => {});
         opened.clear();

@@ -84,6 +84,9 @@ if (process.env.OKCODE_PASSIVE_CHILD) {
             assert.ok(done > 0);
 
             // The active process stays open while the passive one reads.
+            // Count re-embedded docs in THIS (active) process from here on.
+            let redone = 0;
+            oc.db.events.on('embeddings:indexer:doc:done', () => redone++);
             const got = await runChild(store);
             assert.deepEqual(
                 got.workspaces.map((w) => [w.id, w.open]),
@@ -108,20 +111,9 @@ if (process.env.OKCODE_PASSIVE_CHILD) {
             assert.deepEqual(got.status.role, { processors: false, engines: false });
             assert.deepEqual(got.reset, ['code_fake_v1_16']);
 
-            // The re-embed the passive process requested is DURABLE: vectors
-            // and per-doc status dropped, the cursor reset.
-            const requested = (await oc.status('app')).workspaces[0].embedders[0];
-            assert.equal(requested.done, 0, JSON.stringify(requested));
-            assert.equal(requested.pending, done);
-            // It is carried out by the process that holds the roles — at its
-            // next start today: a RUNNING indexer does not yet notice a reset
-            // made from another process (okdb; repro test/okdb-repro/
-            // durable-rebuild-cross-process.js, issue 1). The restart also
-            // exercises okcode's workaround for issue 2 (docs failed at boot
-            // before the resolvers exist → retried on addWorkspace).
-            await oc.close();
-            oc = await okcode.open({ path: store, embedders: { fake: FAKE } });
-            const w = await oc.addWorkspace('app', { access: okcode.access.localFs(root) });
+            // The passive process's reset reaches the RUNNING indexer here (okdb
+            // command epoch + PROC hint): it re-embeds without a restart.
+            const w = oc.workspace('app');
             const deadline = Date.now() + 15000;
             let now;
             for (;;) {
@@ -135,6 +127,7 @@ if (process.env.OKCODE_PASSIVE_CHILD) {
                 await new Promise((r) => setTimeout(r, 200));
             }
             assert.equal(now.state, 'ready');
+            assert.ok(redone >= done, `the live indexer re-embedded every doc (${redone}/${done})`);
             assert.ok((await w.ask('add two numbers', { limit: 3 })).length > 0);
             assert.equal(now.failed, 0);
         });

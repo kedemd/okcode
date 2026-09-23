@@ -192,20 +192,13 @@ describe('cli', () => {
         assert.equal(r.code, 0);
     });
 
-    // TODO: okdb's fts.reset intermittently fails its rebuild ("Cannot read
-    // properties of undefined (reading 'then')" from OKDBWriter.transaction —
-    // childTransaction returned undefined, via _clearIndexStorage) and then
-    // okcode's reset waits on fts.ready() forever. Reported; runs as todo so
-    // the hang is visible without failing the suite.
-    it(
-        'reset --scope fts rebuilds and returns',
-        { skip, todo: 'okdb fts.reset rebuild can fail and hang ready()' },
-        () => {
-            const rf = run(['reset', '--scope', 'fts'], { timeout: 30000 });
-            assert.equal(rf.code, 0, rf.stderr);
-            assert.match(rf.stdout, /reset: symbols, files/);
-        },
-    );
+    // Two FTS indexes share one ~fts env; resetting both used to crash okdb's
+    // writer (nested txn) and hang fts.ready() — fixed in okdb.
+    it('reset --scope fts rebuilds and returns', { skip }, () => {
+        const rf = run(['reset', '--scope', 'fts'], { timeout: 30000 });
+        assert.equal(rf.code, 0, rf.stderr);
+        assert.match(rf.stdout, /reset: symbols, files/);
+    });
 
     it('management: status, sync, workspaces, embedders, reset, remove-workspace', { skip }, () => {
         const s = run(['status', '--json']);

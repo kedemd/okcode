@@ -279,7 +279,7 @@ describe('embedder profiles', () => {
         const fakeDb = {
             embeddings: {
                 registerEmbedderFactory: (t) => registered.push(t),
-                _embedderFactories: new Map([['openai', () => ({})]]),
+                getEmbedderFactory: (type) => (type === 'openai' ? () => ({}) : null),
             },
         };
         const s = emb.fromHost(fakeDb, 'oa', {

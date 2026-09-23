@@ -41,10 +41,8 @@ const isVectorLike = (v) => Array.isArray(v) || ArrayBuffer.isView(v);
 const isBatch = (v) => Array.isArray(v) && v.length > 0 && isVectorLike(v[0]);
 
 // A built-in provider's factory, captured when the profile is registered.
-// okdb keeps its factories in a private map; there is no public getter yet.
 function baseFactory(db, type) {
-    const map = db.embeddings && db.embeddings._embedderFactories;
-    const f = map && typeof map.get === 'function' ? map.get(type) : null;
+    const f = db.embeddings?.getEmbedderFactory?.(type) ?? null;
     if (!f) {
         const err = new Error(
             `okdb has no embedder factory "${type}" (register it with db.embeddings.registerEmbedderFactory)`,

@@ -49,6 +49,36 @@ describe('cli', () => {
     };
     const disk = (rel) => fs.readFileSync(path.join(root, rel), 'utf8');
 
+    it('simple local mode: store in <root>/.okcode, workspace "default", gitignored, never indexed', () => {
+        const { base: b2, root: r2 } = tmpRoot('cli-local');
+        try {
+            writeFixture(r2);
+            fs.writeFileSync(path.join(r2, '.gitignore'), 'node_modules/');
+            const local = (args) =>
+                spawnSync(process.execPath, [BIN, ...args, '--json'], {
+                    cwd: r2, // no --root, no --store: the folder you are in
+                    encoding: 'utf8',
+                    timeout: 120000,
+                    env: { ...process.env, OKCODE_VERBOSE: '' },
+                });
+            const first = local(['stats']);
+            assert.equal(first.status, 0, first.stderr);
+            assert.ok(fs.existsSync(path.join(r2, '.okcode')), 'store created in the folder');
+            const ws = JSON.parse(local(['workspaces']).stdout);
+            assert.deepEqual(
+                (Array.isArray(ws) ? ws : ws.workspaces || []).map((w) => w.id),
+                ['default'],
+            );
+            const files = JSON.parse(first.stdout).files;
+            local(['stats']); // second run: warm, and the store is still not a workspace file
+            assert.equal(JSON.parse(local(['stats']).stdout).files, files, 'the store is never indexed');
+            const gi = fs.readFileSync(path.join(r2, '.gitignore'), 'utf8');
+            assert.equal(gi.match(/^\.okcode\/$/gm)?.length, 1, `gitignored once: ${JSON.stringify(gi)}`);
+        } finally {
+            fs.rmSync(b2, { recursive: true, force: true });
+        }
+    });
+
     it('--help and per-command help need no store', () => {
         const h = spawnSync(process.execPath, [BIN, '--help'], { encoding: 'utf8' });
         assert.equal(h.status, 0);

@@ -16,7 +16,7 @@ Agentless workspace tools for code: **find, read and edit code by name** in loca
 const okcode = require('@kedem/okcode');
 
 const oc = await okcode.open({
-    path: '/var/lib/okcode',                       // okcode's own okdb store (or pass `db`)
+    path: '/var/lib/okcode', // okcode's own okdb store (or pass `db`)
     embedders: { qwen: { type: 'ollama', model: 'qwen3-embedding:0.6b' } },
     active: 'qwen',
 });
@@ -26,7 +26,11 @@ await oc.addWorkspace('app', { access: okcode.access.localFs('/home/me/app') });
 
 // A remote folder — okcode supplies the scripts, you supply the transport
 await oc.addWorkspace('prod-api', {
-    access: okcode.access.shell({ dialect: 'bash', root: '/srv/api', run: (script, stdin) => mySsh.run(script, stdin) }),
+    access: okcode.access.shell({
+        dialect: 'bash',
+        root: '/srv/api',
+        run: (script, stdin) => mySsh.run(script, stdin),
+    }),
 });
 
 const ws = oc.workspace('app');
@@ -36,7 +40,17 @@ const { text, at } = await ws.read('retryWithBackoff');
 await ws.edit('retryWithBackoff', newBody, { at });
 ```
 
-CLI: `okcode find <query>`, `okcode read <symbol>`, `okcode edit <symbol> --file body.txt --at HASH`, `okcode status`, … (see `okcode --help`).
+CLI — run it in a folder; the index lives in `.okcode/` there (workspace `default`), created and kept current automatically:
+
+```sh
+okcode find retryWithBackoff
+okcode read retryWithBackoff            # prints the code; at=<hash> on stderr
+okcode edit retryWithBackoff --file body.txt --at <hash>
+okcode status
+okcode find retry --store /data/okcode --id api   # a shared store holding many workspaces
+```
+
+See `okcode --help`.
 
 ## Docs
 

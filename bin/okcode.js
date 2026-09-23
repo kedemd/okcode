@@ -11,7 +11,6 @@
 // missing or stale token is refused, never silently rebased.
 
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 
 const USAGE = `okcode — find, read and edit code by name
@@ -20,8 +19,11 @@ usage: okcode <command> [args] [--root DIR] [--id NAME] [--store DIR] [--json]
 
 global flags
   --root DIR               the workspace folder (local; default: cwd)
-  --id NAME                workspace id (default: the root's basename)
-  --store DIR              okcode's okdb store (default: ~/.okcode)
+  --store DIR              okcode's okdb store (default: <root>/.okcode — one workspace,
+                           created and kept up to date automatically). Point several
+                           workspaces at one shared store with --store + --id.
+  --id NAME                workspace id (default: "default" in <root>/.okcode;
+                           the root's basename in a shared --store)
   --embedder-config FILE   embedder profiles (JSON: { "embedders": {...}, "active": "name" })
   --json                   machine output
 
@@ -153,8 +155,25 @@ function tree(o, indent = '') {
 
 // ── boot ────────────────────────────────────────────────────────────────
 const root = path.resolve(String(flags.root || process.cwd()));
-const wsId = String(flags.id || path.basename(root) || 'workspace');
-const storeDir = path.resolve(String(flags.store || path.join(os.homedir(), '.okcode')));
+// Simple local mode: the store lives in the folder (like .git) and holds one
+// workspace, "default". A shared store (--store) holds many, one env each.
+const sharedStore = !!flags.store;
+const storeDir = path.resolve(String(flags.store || path.join(root, '.okcode')));
+const wsId = String(flags.id || (sharedStore ? path.basename(root) || 'workspace' : 'default'));
+
+// The in-folder store must never be committed. (Indexing already skips it:
+// dot-directories are pruned by every access facade.)
+function ignoreLocalStore() {
+    if (sharedStore) return;
+    const gi = path.join(root, '.gitignore');
+    try {
+        const text = fs.readFileSync(gi, 'utf8');
+        if (/^\/?\.okcode\/?\s*$/m.test(text)) return;
+        fs.appendFileSync(gi, `${text.endsWith('\n') || !text ? '' : '\n'}.okcode/\n`);
+    } catch {
+        /* no .gitignore — nothing to protect */
+    }
+}
 
 function embedderConfig() {
     if (!flags['embedder-config']) return {};
@@ -176,6 +195,7 @@ let db = null;
 async function openOkcode() {
     const okcode = require('../src/okcode');
     fs.mkdirSync(storeDir, { recursive: true });
+    ignoreLocalStore();
     const { embedders, active } = embedderConfig();
     // The CLI opens okdb itself so okdb's console logging (console.info →
     // STDOUT) can be detached before open: stdout is the answer, and --json

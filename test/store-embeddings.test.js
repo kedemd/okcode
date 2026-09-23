@@ -104,6 +104,17 @@ describe('embedding profiles', () => {
         fs.rmSync(base, { recursive: true, force: true });
     });
 
+    // The drop tests get an okdb of their own: the suite's shared db already
+    // holds default + 4 workspace envs, and an unlicensed okdb allows 5. It
+    // also narrows the byte scan to exactly what that one workspace wrote.
+    async function ownDb(tag) {
+        const dir = path.join(base, `okdb-${tag}`);
+        const own = new OKDB(dir, { auth: { open: true } });
+        own.embeddings.registerEmbedderFactory('bow', factory);
+        await own.open();
+        return { db: own, dir };
+    }
+
     const PROFILES = [
         { name: 'small', embedder: { type: 'bow', model: 'bow' }, dims: 64 },
         { name: 'wide', embedder: { type: 'bow', model: 'bow' }, dims: 96 },
@@ -283,36 +294,46 @@ describe('embedding profiles', () => {
             path.join(root, 'lib', 'lighthouse.js'),
             `'use strict';\nfunction harbour() {\n    // ${PHRASE}, and the octopus always wins.\n    return 17;\n}\nmodule.exports = { harbour };\n`,
         );
-        const st = await openStore({ db, id: 'bytes', access: localFs(root), profiles: [PROFILES[0]] });
-        const ws = await openWorkspace({ id: 'bytes', access: localFs(root), store: st });
-        await ws.sync();
-        await st.settle();
-        assert.ok((await st.ask('lighthouses octopus', { limit: 3 })).some((h) => h.file === 'lib/lighthouse.js'));
-        await ws.close();
-        const walk = (d, out = []) => {
-            for (const e of fs.readdirSync(d, { withFileTypes: true })) {
-                const p = path.join(d, e.name);
-                if (e.isDirectory()) walk(p, out);
-                else out.push(p);
-            }
-            return out;
-        };
-        const leaks = walk(path.join(base, 'okdb')).filter((p) => fs.readFileSync(p).indexOf(PHRASE) >= 0);
-        assert.deepEqual(leaks, [], 'file text is not stored anywhere');
+        const { db, dir } = await ownDb('bytes');
+        try {
+            const st = await openStore({ db, id: 'bytes', access: localFs(root), profiles: [PROFILES[0]] });
+            const ws = await openWorkspace({ id: 'bytes', access: localFs(root), store: st });
+            await ws.sync();
+            await st.settle();
+            assert.ok((await st.ask('lighthouses octopus', { limit: 3 })).some((h) => h.file === 'lib/lighthouse.js'));
+            await ws.close();
+            const walk = (d, out = []) => {
+                for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+                    const p = path.join(d, e.name);
+                    if (e.isDirectory()) walk(p, out);
+                    else out.push(p);
+                }
+                return out;
+            };
+            const leaks = walk(dir).filter((p) => fs.readFileSync(p).indexOf(PHRASE) >= 0);
+            assert.deepEqual(leaks, [], 'file text is not stored anywhere');
 
-        await st.drop();
-        await assert.rejects(db.openEnv(envNameFor('bytes')), { code: 'ENV_NOT_FOUND' });
-        assert.equal(fs.existsSync(path.join(base, 'okdb', envNameFor('bytes'))), false);
+            await st.drop();
+            await assert.rejects(db.openEnv(envNameFor('bytes')), { code: 'ENV_NOT_FOUND' });
+            assert.equal(fs.existsSync(path.join(dir, envNameFor('bytes'))), false);
+        } finally {
+            await db.close();
+        }
     });
 
     it('drop() leaves no directory of the workspace env behind (okdb d195f80: sub-env paths resolved under the root)', async () => {
-        const st = await openStore({ db, id: 'leftover', access: localFs(root), profiles: [PROFILES[0]] });
-        const ws = await openWorkspace({ id: 'leftover', access: localFs(root), store: st });
-        await ws.sync();
-        await st.settle();
-        await ws.close();
-        await st.drop();
-        const left = fs.readdirSync(path.join(base, 'okdb')).filter((d) => d.includes(envNameFor('leftover')));
-        assert.deepEqual(left, []);
+        const { db, dir } = await ownDb('leftover');
+        try {
+            const st = await openStore({ db, id: 'leftover', access: localFs(root), profiles: [PROFILES[0]] });
+            const ws = await openWorkspace({ id: 'leftover', access: localFs(root), store: st });
+            await ws.sync();
+            await st.settle();
+            await ws.close();
+            await st.drop();
+            const left = fs.readdirSync(dir).filter((d) => d.includes(envNameFor('leftover')));
+            assert.deepEqual(left, []);
+        } finally {
+            await db.close();
+        }
     });
 });

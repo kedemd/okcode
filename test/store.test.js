@@ -5,7 +5,7 @@
 // passed where ftsQuery wants a filter — each of which left the index looking
 // healthy while search returned nothing, so these run against a real okdb.
 
-const { describe, it, before, after } = require('node:test');
+const { describe, it, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
@@ -62,13 +62,16 @@ describe('store', () => {
     let base;
     let dbDir;
     let db;
-    before(async () => {
+    // A fresh okdb per test (≈30ms to open): each test builds its own
+    // workspace env, and an unlicensed okdb allows 5 envs (incl. default), so
+    // one db shared by the whole suite would refuse the fifth workspace.
+    beforeEach(async () => {
         base = tmpRoot('store').base;
         dbDir = path.join(base, 'okdb');
         db = new OKDB(dbDir, { auth: { open: true } });
         await db.open();
     });
-    after(async () => {
+    afterEach(async () => {
         if (db) await db.close().catch(() => {});
         fs.rmSync(base, { recursive: true, force: true });
     });

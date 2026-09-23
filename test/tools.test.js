@@ -5,7 +5,7 @@
 // sentence, never a throw, and the edit round trip read → edit(at) → stale at
 // refused works through the tools alone.
 
-const { describe, it, before, after } = require('node:test');
+const { describe, it, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
@@ -19,28 +19,24 @@ const { writeFixture, tmpRoot } = require('./fixtures/code-fixture');
 const atOf = (text) => (/\bat=([0-9A-F]{40})\b/.exec(text) || [])[1] || null;
 
 describe('tools', () => {
-    let db;
-    let dbBase;
     const cleanups = [];
     let n = 0;
 
-    before(async () => {
-        dbBase = tmpRoot('db').base;
-        db = new OKDB(path.join(dbBase, 'okdb'), { auth: { open: true } });
-        await db.open();
-    });
     after(async () => {
         for (const c of cleanups) await c().catch(() => {});
-        await db.close();
-        fs.rmSync(dbBase, { recursive: true, force: true });
     });
 
+    // Each test gets its own okdb (≈30ms to open) rather than one env apiece in
+    // a shared one: every workspace is an okdb env, and an unlicensed okdb
+    // allows 5 (incl. default).
     async function setup({ extra = null, second = false } = {}) {
         const { base, root } = tmpRoot();
         writeFixture(root);
         if (extra) extra(root);
         const access = localFs(root);
         const id = `tools-${++n}`;
+        const db = new OKDB(path.join(base, 'okdb'), { auth: { open: true } });
+        await db.open();
         const st = await openStore({ db, id, access });
         const ws = await openWorkspace({ id, access, store: st });
         const map = new Map([[id, ws]]);
@@ -55,6 +51,7 @@ describe('tools', () => {
         });
         cleanups.push(async () => {
             await ws.close();
+            await db.close();
             fs.rmSync(base, { recursive: true, force: true });
         });
         return { root, ws, tools, id };

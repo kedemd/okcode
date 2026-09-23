@@ -151,4 +151,4 @@ Notes: `reset('fts')` needs the workspace **open** in this process (the content 
 
 ## 11. Compatibility
 
-okcode 0.1 requires okdb 2.3 (resolved fields incl. batch resolvers, reconcile-based embeddings, async `describeChunk`). During development `@kedem/okdb` is `file:../okdb-src`; the two are released together once both work end to end.
+okcode 0.1 requires okdb 2.3 (resolved fields incl. batch resolvers, reconcile-based embeddings, async `describeChunk`): the dependency is `@kedem/okdb ^2.3.0`, the published package. That package is okdb's production build, so its free-tier limits are enforced (§5); the few tests that need more than the free tier (three embedder profiles in one workspace, installing a test-signed license) skip there and run against a dev checkout of okdb or under a license.

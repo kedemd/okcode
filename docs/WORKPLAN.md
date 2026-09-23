@@ -27,6 +27,15 @@ Build order, ownership boundaries, and status. Each phase's modules have one own
 
 Manager: end-to-end over ssh with real okdb, then the brain adapter (separate work in `~/github/brain`), then release okdb 2.3 + okcode 0.1 together.
 
+## Phase E — joint release (okdb 2.3.0 + okcode 0.1.0), then the brain
+
+The brain moves onto okcode only AFTER both are published (the brain's own sequencing). Order:
+
+1. **Brain-reported items closed**: okdb vector-view bugs (writer view misses live updates after unload; writer reloaded as reader), and okcode's brain API (precomputed-vector search, embedder identity incl. type + endpoint, sizes/outlines without reading content).
+2. **okdb**: full suite green (one file at a time) → merge `fix/embeddings-queue-junk` into `main` (ff) → version `2.3.0` + date the CHANGELOG → `npm run build:release` (+ `verify-dist`) → run okcode's full suite against the built `release/` package (not `src/`) → **owner go-ahead** → `npm run release` (pushes main + tags, publishes npm + public repo).
+3. **okcode**: depend on `@kedem/okdb ^2.3.0` from npm (drop `file:../okdb-src`) → decide `private`/`license` → version `0.1.0` → full suite + e2e (Ollama) → **owner go-ahead** → `npm publish --access public`.
+4. **brain**: adapter at `/data/okcode` (worker with roles, main passive), delete `src/codeindex/` and its `code` env data; delete `src/vector-views.js` + `snapshotEveryChanges` overrides if okdb 2.3 makes them unnecessary.
+
 ## Rules for every owner
 
 - Node ≥ 20, CommonJS, `node:test` + `node:assert/strict`, no new dependencies without the manager.

@@ -12,7 +12,6 @@ const {
     headedChunks,
     prepareText,
     markLength,
-    pipelineName,
     slug,
     boundariesFor,
     CHUNK_MAX,
@@ -120,13 +119,9 @@ describe('headedChunks + prepareText', () => {
     });
 });
 
-describe('pipelineName', () => {
-    it('encodes model and dims, so two configurations can never share a store', () => {
-        assert.equal(pipelineName('qwen3-embedding:0.6b', 1024), 'code_qwen3_embedding_0_6b_1024');
-        assert.notEqual(pipelineName('m', 8), pipelineName('m', 16));
-        assert.notEqual(pipelineName('a', 8), pipelineName('b', 8));
-        assert.throws(() => pipelineName('m', null));
-        assert.throws(() => pipelineName(null, 8));
+describe('slug', () => {
+    it('lowercases to [a-z0-9_] and trims separators', () => {
         assert.equal(slug('--A.b--'), 'a_b');
+        assert.equal(slug('qwen3-embedding:0.6b'), 'qwen3_embedding_0_6b');
     });
 });

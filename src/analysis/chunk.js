@@ -39,22 +39,12 @@ const MIN_EMBED_CHARS = 120;
 const CHUNK = 1400;
 const CHUNK_MAX = 2600;
 
-// The pipeline is named after its CONFIGURATION, not after what it holds.
-//
-// Vectors from two models are not comparable — different spaces, often
-// different dimensionality — and a store that mixes them returns nonsense
-// while looking perfectly healthy. Encoding model and dims in the name makes
-// that impossible: changing either addresses a different store.
+// The readable part of a pipeline name (src/identity.js names pipelines).
 const slug = (s) =>
     String(s)
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, '_')
         .replace(/^_|_$/g, '');
-function pipelineName(model, dims) {
-    if (!model) throw new Error('pipelineName needs a model');
-    if (!Number.isInteger(dims) || dims <= 0) throw new Error(`pipelineName needs integer dims (got ${dims})`);
-    return `code_${slug(model)}_${dims}`;
-}
 
 // ── boundaries ──────────────────────────────────────────────────────────────
 
@@ -308,7 +298,6 @@ module.exports = {
     PREPARER,
     MIN_EMBED_CHARS,
     slug,
-    pipelineName,
     boundaries,
     walkInner,
     paragraphBoundaries,

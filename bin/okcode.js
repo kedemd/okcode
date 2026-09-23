@@ -523,7 +523,7 @@ async function embedders() {
     if (!list.length) return out('no embedder profiles (pass --embedder-config FILE.json)');
     for (const p of list) {
         out(
-            `  ${p.active ? '*' : ' '} ${pad(p.name, 16)} ${pad(p.type, 10)} ${pad(p.model, 32)} ${pad(p.dims ? `${p.dims}d` : '?d', 6)} ${p.state}`,
+            `  ${p.active ? '*' : ' '} ${pad(p.name, 16)} ${pad(p.type, 10)} ${pad(p.model, 32)} ${pad(p.dims ? `${p.dims}d` : '?d', 6)} ${p.state}${p.endpoint ? `  ${p.endpoint}` : ''}`,
         );
     }
 }

@@ -14,6 +14,7 @@ const { fork } = require('child_process');
 const okcode = require('../src/okcode');
 
 const FAKE = { type: 'fake', model: 'fake-v1', dims: 16 };
+const FAKE_PIPELINE = require('../src/identity').pipelineName({ type: 'fake', endpoint: '', model: 'fake-v1' }, 16);
 
 async function passiveChild(store) {
     const oc = await okcode.open({ path: store, role: { processors: false, engines: false } });
@@ -103,13 +104,13 @@ if (process.env.OKCODE_PASSIVE_CHILD) {
             assert.equal(theirs.embedders.length, 1);
             const e = theirs.embedders[0];
             assert.equal(e.name, 'fake');
-            assert.equal(e.pipeline, 'code_fake_v1_16');
+            assert.equal(e.pipeline, FAKE_PIPELINE);
             assert.equal(e.dims, 16);
             assert.equal(e.active, true);
             assert.equal(e.done, done, JSON.stringify(e));
             assert.equal(e.failed, 0);
             assert.deepEqual(got.status.role, { processors: false, engines: false });
-            assert.deepEqual(got.reset, ['code_fake_v1_16']);
+            assert.deepEqual(got.reset, [FAKE_PIPELINE]);
 
             // The passive process's reset reaches the RUNNING indexer here (okdb
             // command epoch + PROC hint): it re-embeds without a restart.
@@ -122,7 +123,7 @@ if (process.env.OKCODE_PASSIVE_CHILD) {
                 if (now.done === done && now.pending === 0) break;
                 if (Date.now() > deadline)
                     assert.fail(
-                        `re-embed did not converge: ${JSON.stringify(now)} ${JSON.stringify(oc.db.embeddings._durableIndexerDocs('okcode_app:code_fake_v1_16', { status: 'failed', limit: 3 }))}`,
+                        `re-embed did not converge: ${JSON.stringify(now)} ${JSON.stringify(oc.db.embeddings._durableIndexerDocs(`okcode_app:${FAKE_PIPELINE}`, { status: 'failed', limit: 3 }))}`,
                     );
                 await new Promise((r) => setTimeout(r, 200));
             }

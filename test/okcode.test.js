@@ -13,6 +13,9 @@ const okcode = require('../src/okcode');
 const { envNameFor } = require('../src/store');
 const { localFs } = okcode.access;
 const { writeFixture, FIXTURE_FILES, tmpRoot, counted } = require('./fixtures/code-fixture');
+const { pipelineName } = require('../src/identity');
+// A pipeline's name for an identity (src/identity.js).
+const pn = (type, model, dims, endpoint = '') => pipelineName({ type, endpoint, model }, dims);
 
 // okdb's built-in 'fake' embedder: deterministic, no network, no function —
 // so its profile persists completely.
@@ -88,7 +91,7 @@ describe('okcode.open({ path })', () => {
             assert.equal(w.embedders.length, 1);
             const e = w.embedders[0];
             assert.equal(e.name, 'fake');
-            assert.equal(e.pipeline, 'code_fake_v1_16');
+            assert.equal(e.pipeline, pn('fake', 'fake-v1', 16));
             assert.equal(e.dims, 16);
             assert.equal(e.active, true);
             assert.equal(st.active, 'fake');
@@ -119,7 +122,7 @@ describe('okcode.open({ path })', () => {
             const st = await oc.status('app');
             assert.equal(st.workspaces[0].open, false);
             assert.equal(st.workspaces[0].files, FIXTURE_FILES.length);
-            assert.equal(st.workspaces[0].embedders[0].pipeline, 'code_fake_v1_16');
+            assert.equal(st.workspaces[0].embedders[0].pipeline, pn('fake', 'fake-v1', 16));
             await assert.rejects(oc.sync('app'), { code: 'OKCODE_WORKSPACE_NOT_OPEN' });
 
             const c = counted(localFs(root));
@@ -213,7 +216,7 @@ describe('okcode.open({ db })', () => {
 
             const rv = await oc.reset('rs', { scope: 'vectors' });
             assert.equal(rv.rebuilt.length, 1);
-            assert.equal(rv.rebuilt[0].pipeline, 'code_f2_8');
+            assert.equal(rv.rebuilt[0].pipeline, pn('fake2', 'f2', 8));
             await ws.store.settle();
             e = (await oc.status('rs')).workspaces[0].embedders[0];
             assert.equal(e.done, done, 're-embedded everything');

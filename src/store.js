@@ -26,6 +26,7 @@
 
 const crypto = require('crypto');
 const chunk = require('./analysis/chunk');
+const identity = require('./identity');
 
 const FILES = 'files';
 const SYMBOLS = 'symbols';
@@ -108,6 +109,33 @@ function quoteLines(text, query, perFile = 3) {
         if (n) scored.push({ line: i + 1, n, text: lines[i].trim().slice(0, 200) });
     }
     return scored.sort((a, b) => b.n - a.n || a.line - b.line).slice(0, perFile);
+}
+
+// A query as ask() takes it: a string, or { text?, vector?, identity? } — a
+// vector the host already embedded (so no embed call is made for it), with
+// the text the lexical eyes need. Returns { text, vector, identity } with the
+// vector as a Float32Array; throws OKCODE_BAD_QUERY when there is neither.
+function asQuery(query) {
+    const bad = (why) => {
+        const err = new Error(`ask: ${why}`);
+        err.code = 'OKCODE_BAD_QUERY';
+        return err;
+    };
+    if (typeof query === 'string') return { text: query, vector: null, identity: null };
+    if (!query || typeof query !== 'object' || ArrayBuffer.isView(query) || Array.isArray(query)) {
+        throw bad('the query must be a string or { text?, vector? }');
+    }
+    let vector = null;
+    if (query.vector != null) {
+        const v = query.vector;
+        if (v instanceof Float32Array) vector = v;
+        else if (Array.isArray(v) || (ArrayBuffer.isView(v) && !(v instanceof DataView))) vector = Float32Array.from(v);
+        else throw bad('vector must be a Float32Array (or an array of numbers)');
+        if (!vector.length) throw bad('vector is empty');
+    }
+    const text = typeof query.text === 'string' && query.text.trim() ? query.text : null;
+    if (!text && !vector) throw bad('needs text, a vector, or both');
+    return { text, vector, identity: typeof query.identity === 'string' ? query.identity : null };
 }
 
 // Registered per PROCESS, not per store: a chunk strategy is a function
@@ -212,25 +240,26 @@ async function openStore({ db, id, access, profiles = [], log = () => {} } = {})
 
     // ── embeddings profiles ─────────────────────────────────────────────
     registerChunker(db);
-    const profileState = new Map(); // profile name -> { name, model, dims, pipeline, scoped, error }
+    // profile name -> { name, model, parts, dims, identity, pipeline, scoped, embedderName, error }
+    const profileState = new Map();
 
     const modelOf = (cfg) => (cfg && (cfg.model || cfg.type)) || null;
 
     // The dimension a previous run already committed to, read off the
-    // pipeline record it left behind. The name encodes model and dims
-    // precisely so this is answerable without asking the model — which
-    // matters most to a process that must NOT ask (no engines role).
-    async function dimsFromRecords(model) {
-        const want = new RegExp(`^code_${chunk.slug(model)}_(\\d+)$`);
+    // pipeline record it left behind. The name encodes the identity (and the
+    // dims readably) precisely so this is answerable without asking the
+    // model — which matters most to a process that must NOT ask (no engines
+    // role).
+    async function dimsFromRecords(parts) {
         try {
-            for (const { key, value } of (await env.pipelines.listRecords()) || []) {
-                const m = want.exec(String((value && value.name) || key || ''));
-                if (m) return Number(m[1]);
-            }
+            const names = ((await env.pipelines.listRecords()) || []).map(({ key, value }) =>
+                String((value && value.name) || key || ''),
+            );
+            const hit = identity.findPipeline(names, parts);
+            return hit ? hit.dims : null;
         } catch {
-            /* no pipelines yet */
+            return null; // no pipelines yet
         }
-        return null;
     }
 
     async function ensureProfile(profile) {
@@ -238,19 +267,36 @@ async function openStore({ db, id, access, profiles = [], log = () => {} } = {})
         if (!name) throw new Error('an embedding profile needs a name');
         if (!embedder || typeof embedder !== 'object') throw new Error(`profile "${name}" needs an embedder config`);
         const model = modelOf(embedder);
-        const st = { name, model, dims: null, pipeline: null, scoped: null, embedderName: null, error: null };
+        // The vector space this profile embeds into, minus the dims (below).
+        // okcode's profiles carry it (the provider, not a derived factory
+        // type); a bare store profile falls back to its embedder config.
+        const parts = profile.identity || identity.partsOf(embedder);
+        const st = {
+            name,
+            model,
+            parts,
+            dims: null,
+            identity: null,
+            pipeline: null,
+            scoped: null,
+            embedderName: null,
+            error: null,
+        };
         profileState.set(name, st);
         try {
             let dims = profile.dims || embedder.dims || null;
             if (!dims && db.embeddings.resolveModelDims)
-                dims = db.embeddings.resolveModelDims(embedder.type, embedder.model) || null;
-            if (!dims) dims = await dimsFromRecords(model);
+                dims = db.embeddings.resolveModelDims(parts.type, parts.model || embedder.model) || null;
+            if (!dims) dims = await dimsFromRecords(parts);
             let embedderRef = null;
             if (!dims) {
                 // Dimensionality is the model's to state, not ours to assume.
                 // Start the embedder on its own (probing it) and hand the
-                // same engine to the pipeline.
-                const embName = `${envName}:emb_${chunk.slug(name)}`;
+                // same engine to the pipeline. Named after the space too: a
+                // url change must probe the NEW endpoint, not reuse an
+                // engine still pointed at the old one.
+                const space = identity.shortHash(JSON.stringify([parts.type, parts.endpoint, parts.model]));
+                const embName = `${envName}:emb_${chunk.slug(name)}_${space}`;
                 const engine =
                     db.engines.getEngine?.('embedder', embName) ||
                     (await db.embeddings.createEmbedder(embName, embedder, {}, envName));
@@ -259,9 +305,9 @@ async function openStore({ db, id, access, profiles = [], log = () => {} } = {})
                 if (!dims) throw new Error(`could not learn the dimensions of ${model} — pass dims`);
                 embedderRef = { name: embName };
             }
-            const pipeline = chunk.pipelineName(model, dims);
+            const pipeline = identity.pipelineName(parts, dims);
             const scoped = `${envName}:${pipeline}`;
-            Object.assign(st, { dims, pipeline, scoped });
+            Object.assign(st, { dims, pipeline, scoped, identity: identity.identityOf(parts, dims) });
             const existing = await env.pipelines.getRecord(pipeline);
             if (!existing) {
                 await db.embeddings.createPipeline(pipeline, {
@@ -488,8 +534,11 @@ async function openStore({ db, id, access, profiles = [], log = () => {} } = {})
                 out.push({
                     name: p.name,
                     model: p.model,
+                    type: p.parts.type || null,
+                    endpoint: p.parts.endpoint || null,
                     pipeline: p.pipeline,
                     dims: p.dims,
+                    identity: p.identity,
                     error: p.error,
                     status,
                 });
@@ -514,7 +563,16 @@ async function openStore({ db, id, access, profiles = [], log = () => {} } = {})
         // symbol is the workspace's job, against text it has verified. With
         // `text: true`, each hit also carries the chunk's text, re-derived
         // through the resolver and returned only if the file still holds it.
+        //
+        // `query` is a string (embedded here, by the profile's embedder) or
+        // { vector, text?, identity? } — a vector the host already embedded,
+        // searched as-is with NO embed call. It must have the profile's dims
+        // (OKCODE_DIMS_MISMATCH otherwise — a wrong-length vector is a wrong
+        // space, never "close enough"), and when the host says which space
+        // it came from (`identity`) that must be this profile's
+        // (OKCODE_IDENTITY_MISMATCH).
         async ask(query, { profile = null, limit = 8, text = false } = {}) {
+            const q = asQuery(query);
             const p = profileFor(profile);
             if (!p) {
                 const err = new Error(
@@ -530,8 +588,24 @@ async function openStore({ db, id, access, profiles = [], log = () => {} } = {})
                 err.code = 'OKCODE_NO_EMBEDDINGS';
                 throw err;
             }
+            if (q.vector) {
+                if (q.vector.length !== p.dims) {
+                    const err = new Error(
+                        `embedding profile "${p.name}" holds ${p.dims}-dim vectors; the query vector has ${q.vector.length}`,
+                    );
+                    err.code = 'OKCODE_DIMS_MISMATCH';
+                    throw err;
+                }
+                if (q.identity && q.identity !== p.identity) {
+                    const err = new Error(
+                        `embedding profile "${p.name}" is ${p.identity}; the query vector is from ${q.identity}`,
+                    );
+                    err.code = 'OKCODE_IDENTITY_MISMATCH';
+                    throw err;
+                }
+            }
             const api = db.embeddings.search(p.scoped);
-            const raw = (await api.search(String(query), { limit: limit * 3 })) || [];
+            const raw = (await api.search(q.vector || q.text, { limit: limit * 3 })) || [];
             // Best chunk per file.
             const best = new Map();
             for (const r of raw) {
@@ -578,6 +652,7 @@ async function openStore({ db, id, access, profiles = [], log = () => {} } = {})
 
 module.exports = {
     openStore,
+    asQuery,
     envNameFor,
     quoteLines,
     queryTerms,

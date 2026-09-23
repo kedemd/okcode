@@ -240,7 +240,42 @@ function extract(path, src) {
         // must never take the whole scan down with it, same guarantee the
         // built-in EXTRACTORS path below gives itself.
         try {
-            const { okAnalysis, diagnostics, coverage, regions, ...envelope } = ext.analyze({ path, source: src });
+            const { okAnalysis, diagnostics, coverage, regions, fallback, ...envelope } = ext.analyze({
+                path,
+                source: src,
+            });
+            // An extension that cannot do its job (an optional analyser not
+            // installed) may ask for the generic extractor instead of leaving
+            // the file unparsed: a `.ok.js` file is still JavaScript. Its
+            // reason rides along so the degraded result is visible as such.
+            const generic = fallback && EXTRACTORS.get(lang);
+            if (generic) {
+                try {
+                    return {
+                        path,
+                        lang,
+                        lines,
+                        ...generic(path, src),
+                        parsed: true,
+                        indexed: true,
+                        analyzerVersion: ext.version,
+                        reason: envelope.reason,
+                    };
+                } catch (err) {
+                    return {
+                        path,
+                        lang,
+                        lines,
+                        symbols: [],
+                        imports: [],
+                        exports: [],
+                        parsed: false,
+                        indexed: true,
+                        analyzerVersion: ext.version,
+                        reason: `${envelope.reason}; ${String(err.message).slice(0, 160)}`,
+                    };
+                }
+            }
             return {
                 path,
                 lang,
@@ -387,6 +422,58 @@ function extractJavaScript(path, src) {
         }
     }
 
+    // `const a = …, b = () => {}` — one symbol per named declarator. `span` is
+    // the node whose bytes the symbol owns: the declaration itself, or the
+    // `export …` statement wrapping it, so that editing an exported const by
+    // name replaces the `export` keyword along with it (the same way an
+    // exported function's span already does). Every declarator of one
+    // statement shares that statement's span — splitting a multi-declarator
+    // statement into per-declarator byte ranges would hand an edit a range
+    // that is not a statement.
+    function variables(decl, span, parent, depth, prevEnd, exported = false) {
+        for (const d of decl.declarations) {
+            if (!d.id || d.id.type !== 'Identifier') continue;
+            const init = d.init || {};
+            // A top-level require() is an import edge, not a symbol. An
+            // EXPORTED one is a binding the file exposes, so it stays a symbol.
+            if (
+                !parent &&
+                !exported &&
+                init.type === 'CallExpression' &&
+                init.callee &&
+                init.callee.name === 'require'
+            ) {
+                const from = init.arguments[0] && init.arguments[0].value;
+                if (from) imports.push({ local: d.id.name, from, line: decl.loc.start.line });
+                continue;
+            }
+            const fn = fnOf(init);
+            // Inside a scope only FUNCTIONS earn a name. A local
+            // `const rows = []` is not something anyone addresses, and
+            // indexing every one of them would bury the things that are.
+            if (!fn && parent) continue;
+            const child = push(d.id.name, fn ? 'function' : 'const', span, {
+                parent,
+                prevEnd,
+                ...(fn ? { signature: signatureOf(src, d, d.id.name) } : {}),
+                ...(exported ? { exported: true } : {}),
+            });
+            if (fn) descend(fn, child, depth + 1);
+        }
+    }
+
+    // The names a binding pattern introduces: `{ a, b: c, ...d }` → a, c, d.
+    function boundNames(p, out = []) {
+        if (!p) return out;
+        if (p.type === 'Identifier') out.push(p.name);
+        else if (p.type === 'ObjectPattern')
+            for (const q of p.properties) boundNames(q.type === 'RestElement' ? q.argument : q.value, out);
+        else if (p.type === 'ArrayPattern') for (const q of p.elements) boundNames(q, out);
+        else if (p.type === 'RestElement') boundNames(p.argument, out);
+        else if (p.type === 'AssignmentPattern') boundNames(p.left, out);
+        return out;
+    }
+
     // One statement, at any depth. `parent` null means top level, which is the
     // only place imports, exports and module.exports can appear.
     function statement(node, parent, depth, prevEnd) {
@@ -410,27 +497,7 @@ function extractJavaScript(path, src) {
             return;
         }
         if (node.type === 'VariableDeclaration') {
-            for (const d of node.declarations) {
-                if (!d.id || d.id.type !== 'Identifier') continue;
-                const init = d.init || {};
-                // A top-level require() is an import edge, not a symbol.
-                if (!parent && init.type === 'CallExpression' && init.callee && init.callee.name === 'require') {
-                    const from = init.arguments[0] && init.arguments[0].value;
-                    if (from) imports.push({ local: d.id.name, from, line: node.loc.start.line });
-                    continue;
-                }
-                const fn = fnOf(init);
-                // Inside a scope only FUNCTIONS earn a name. A local
-                // `const rows = []` is not something anyone addresses, and
-                // indexing every one of them would bury the things that are.
-                if (!fn && parent) continue;
-                const child = push(d.id.name, fn ? 'function' : 'const', node, {
-                    parent,
-                    prevEnd,
-                    ...(fn ? { signature: signatureOf(src, d, d.id.name) } : {}),
-                });
-                if (fn) descend(fn, child, depth + 1);
-            }
+            variables(node, node, parent, depth, prevEnd);
             return;
         }
         if (parent) {
@@ -442,14 +509,22 @@ function extractJavaScript(path, src) {
             imports.push({ local: null, from: node.source.value, line: node.loc.start.line, esm: true });
         } else if (node.type === 'ExportNamedDeclaration' || node.type === 'ExportDefaultDeclaration') {
             const decl = node.declaration;
-            if (decl && decl.id) {
+            const isDefault = node.type === 'ExportDefaultDeclaration';
+            if (decl && decl.type === 'VariableDeclaration') {
+                // `export const X = …` — the same symbols a bare `const`
+                // would produce, spanning the whole export statement.
+                variables(decl, node, null, depth, prevEnd, true);
+                for (const d of decl.declarations) exports.push(...boundNames(d.id));
+            } else if (decl && decl.id) {
                 const child = push(decl.id.name, decl.type === 'ClassDeclaration' ? 'class' : 'function', node, {
                     prevEnd,
                     exported: true,
+                    ...(decl.type === 'FunctionDeclaration' ? { signature: signatureOf(src, decl, decl.id.name) } : {}),
                 });
                 descend(decl, child, depth + 1);
-            }
-            for (const s of node.specifiers || []) if (s.exported) exports.push(s.exported.name);
+                exports.push(isDefault ? 'default' : decl.id.name);
+            } else if (isDefault) exports.push('default');
+            for (const s of node.specifiers || []) if (s.exported) exports.push(s.exported.name || s.exported.value);
             if (node.source)
                 imports.push({
                     local: null,
@@ -458,6 +533,18 @@ function extractJavaScript(path, src) {
                     esm: true,
                     reexport: true,
                 });
+        } else if (node.type === 'ExportAllDeclaration') {
+            // `export * from './m'` / `export * as ns from './m'` — a
+            // re-export edge like `export { x } from`; the namespace form
+            // also introduces one exported name.
+            if (node.exported) exports.push(node.exported.name || node.exported.value);
+            imports.push({
+                local: null,
+                from: node.source.value,
+                line: node.loc.start.line,
+                esm: true,
+                reexport: true,
+            });
         } else if (node.type === 'ExpressionStatement') {
             const e = node.expression;
             if (e.type === 'AssignmentExpression' && /^module\.exports/.test(src.slice(e.left.start, e.left.end))) {

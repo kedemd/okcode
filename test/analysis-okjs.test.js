@@ -2,8 +2,8 @@
 // The generic extension registry (extensions.js) and its one registrant, the
 // okjs extension (ext-okjs.js). Nothing here re-implements OKJS syntax — it
 // asserts the CONTRACT: a `.ok.js` file gets structural symbols when the
-// optional @kedem/okjs peer is installed, a clear "unavailable" reason when it
-// is not, a throwing analyser cannot crash extraction, and `.ok.html` gets
+// optional @kedem/okjs peer is installed, a plain-JS fallback with a visible
+// "unavailable" reason when it is not, a throwing analyser cannot crash extraction, and `.ok.html` gets
 // validated. Passes whether or not @kedem/okjs resolves; the tooling-present
 // cases are skipped when it does not (run with NODE_PATH pointing at an
 // install to exercise them).
@@ -84,16 +84,64 @@ test('the analyser version is stamped on every .ok.js extraction', () => {
     assert.equal(okjs.baseURLFor('\\a\\b.ok.js'), 'file:///a/b.ok.js');
 });
 
+// @kedem/okjs is a dev dependency here, so absence is SIMULATED: the real
+// analyser, built with a tooling loader that finds nothing.
+test('without @kedem/okjs: plain-JS fallback with a visible reason, never unparsed', () => {
+    const src = [
+        "import { html } from './lib.js';",
+        "export * from './shared.js';",
+        '// Formats a title.',
+        'export const fmt = (t) => t.toUpperCase();',
+        CARD,
+    ].join('\n');
+    extensions.registerExtension({
+        id: 'okjs',
+        match: (p) => MATCH.test(p),
+        analyze: okjs.makeAnalyze(() => null),
+        version: '0:0',
+    });
+    try {
+        const r = extract('card.ok.js', src);
+        assert.equal(r.parsed, true, r.reason);
+        assert.equal(r.indexed, true);
+        assert.equal(r.lang, 'javascript');
+        assert.equal(r.analyzerVersion, '0:0');
+        assert.match(r.reason, /okjs tooling unavailable.*okjs-specific analysis skipped/);
+        assert.equal(r.okAnalysis, undefined, 'no okjs envelope is invented');
+        const fmt = r.symbols.find((x) => x.name === 'fmt');
+        assert.equal(fmt.kind, 'function');
+        assert.equal(fmt.signature, 'fmt(t)');
+        assert.equal(fmt.exported, true);
+        assert.equal(src.slice(fmt.start, fmt.end), 'export const fmt = (t) => t.toUpperCase();');
+        assert.deepEqual(
+            r.imports.map((i) => i.from),
+            ['./lib.js', './shared.js'],
+        );
+        assert.deepEqual(r.exports, ['fmt', 'default']);
+        // Source acorn cannot parse is still unparsed, with both reasons.
+        const bad = extract('bad.ok.js', 'export default {{{');
+        assert.equal(bad.parsed, false);
+        assert.match(bad.reason, /okjs tooling unavailable/);
+        // .ok.html has no generic extractor: unparsed, but still says why.
+        const h = extract('x.ok.html', '<script type="module">\n</script>\n');
+        assert.equal(h.parsed, false);
+        assert.match(h.reason, /okjs tooling unavailable/);
+        const v = validateSource({ rel: 'x.ok.html', text: '<script type="module">\n</script>\n' });
+        // Nothing was checked without the tooling: "skipped", never "passed".
+        assert.ok(v.validators.some((x) => x.validator === 'okjs-analyze' && x.status === 'skipped'));
+    } finally {
+        registerReal();
+    }
+});
+
 test(
-    'without @kedem/okjs: unparsed with a reason, never a crash',
+    'without @kedem/okjs (genuinely absent): the real loader reports 0:0',
     { skip: hasTooling && 'okjs tooling installed' },
     () => {
-        const r = extract('card.ok.js', CARD);
-        assert.equal(r.parsed, false);
-        assert.match(r.reason, /okjs tooling unavailable/);
         assert.equal(REAL_VERSION, '0:0');
-        const v = validateSource({ rel: 'x.ok.html', text: '<script type="module">\n</script>\n' });
-        assert.ok(v.validators.some((x) => x.validator === 'okjs-analyze' && x.status === 'passed'));
+        const r = extract('card.ok.js', CARD);
+        assert.equal(r.parsed, true, r.reason);
+        assert.match(r.reason, /okjs tooling unavailable/);
     },
 );
 

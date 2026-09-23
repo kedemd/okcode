@@ -294,23 +294,34 @@ function validateSource({ rel, text, moduleKind = 'ambiguous', palette = [] }) {
     if (ext) {
         try {
             const result = ext.analyze({ path: rel, source: text });
-            for (const d of result.diagnostics || []) {
-                diagnostics.push({
-                    source: d.source,
-                    code: d.code,
-                    severity: d.severity,
-                    message: d.message,
-                    start: d.range.start,
-                    end: d.range.end,
-                    line: d.range.loc.start.line,
-                    column: d.range.loc.start.column,
+            // The extension's tooling is unavailable here (e.g. okjs not installed):
+            // nothing was checked, so the validator is "skipped", never "passed".
+            if (result.fallback) {
+                validators.push({
+                    validator: `${ext.id}-analyze`,
+                    status: 'skipped',
+                    covers: [],
+                    note: String(result.reason || 'analyser unavailable').slice(0, 160),
+                });
+            } else {
+                for (const d of result.diagnostics || []) {
+                    diagnostics.push({
+                        source: d.source,
+                        code: d.code,
+                        severity: d.severity,
+                        message: d.message,
+                        start: d.range.start,
+                        end: d.range.end,
+                        line: d.range.loc.start.line,
+                        column: d.range.loc.start.column,
+                    });
+                }
+                validators.push({
+                    validator: `${ext.id}-analyze`,
+                    status: (result.diagnostics || []).some((d) => d.severity === 'error') ? 'failed' : 'passed',
+                    covers: fullSpan,
                 });
             }
-            validators.push({
-                validator: `${ext.id}-analyze`,
-                status: (result.diagnostics || []).some((d) => d.severity === 'error') ? 'failed' : 'passed',
-                covers: fullSpan,
-            });
         } catch (err) {
             // Same contract as template-balance above: a checker that throws
             // must never make a file uneditable.
@@ -441,23 +452,34 @@ async function validateSourceAsync({ rel, text, moduleKind = 'ambiguous', palett
     if (ext) {
         try {
             const result = ext.analyze({ path: rel, source: text });
-            for (const d of result.diagnostics || []) {
-                diagnostics.push({
-                    source: d.source,
-                    code: d.code,
-                    severity: d.severity,
-                    message: d.message,
-                    start: d.range.start,
-                    end: d.range.end,
-                    line: d.range.loc.start.line,
-                    column: d.range.loc.start.column,
+            // The extension's tooling is unavailable here (e.g. okjs not installed):
+            // nothing was checked, so the validator is "skipped", never "passed".
+            if (result.fallback) {
+                validators.push({
+                    validator: `${ext.id}-analyze`,
+                    status: 'skipped',
+                    covers: [],
+                    note: String(result.reason || 'analyser unavailable').slice(0, 160),
+                });
+            } else {
+                for (const d of result.diagnostics || []) {
+                    diagnostics.push({
+                        source: d.source,
+                        code: d.code,
+                        severity: d.severity,
+                        message: d.message,
+                        start: d.range.start,
+                        end: d.range.end,
+                        line: d.range.loc.start.line,
+                        column: d.range.loc.start.column,
+                    });
+                }
+                validators.push({
+                    validator: `${ext.id}-analyze`,
+                    status: (result.diagnostics || []).some((d) => d.severity === 'error') ? 'failed' : 'passed',
+                    covers: fullSpan,
                 });
             }
-            validators.push({
-                validator: `${ext.id}-analyze`,
-                status: (result.diagnostics || []).some((d) => d.severity === 'error') ? 'failed' : 'passed',
-                covers: fullSpan,
-            });
         } catch (err) {
             validators.push({
                 validator: `${ext.id}-analyze`,

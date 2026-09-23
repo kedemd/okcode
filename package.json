@@ -1,0 +1,35 @@
+{
+    "name": "@kedem/okcode",
+    "version": "0.1.0",
+    "description": "Agentless workspace tools: find, read and edit code by name in local or remote workspaces — indexed with okdb (symbols, full-text, embeddings), content never copied.",
+    "main": "src/okcode.js",
+    "bin": {
+        "okcode": "bin/okcode.js"
+    },
+    "files": [
+        "src",
+        "bin",
+        "docs",
+        "README.md"
+    ],
+    "scripts": {
+        "test": "node --test --test-force-exit test/"
+    },
+    "engines": {
+        "node": ">=20"
+    },
+    "dependencies": {
+        "@kedem/okdb": "file:../okdb-src",
+        "acorn": "^8.18.0"
+    },
+    "peerDependencies": {
+        "@kedem/okjs": ">=1.3.0"
+    },
+    "peerDependenciesMeta": {
+        "@kedem/okjs": {
+            "optional": true
+        }
+    },
+    "license": "UNLICENSED",
+    "private": true
+}

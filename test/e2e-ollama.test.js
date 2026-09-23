@@ -8,8 +8,12 @@
 // with OKCODE_E2E_MODEL (default qwen3-embedding:latest). Slow by design
 // (minutes): it embeds a few hundred chunks.
 //
-// The corpus is a COPY of okdb's own embeddings feature — edits land on the
-// copy, never on a real repo.
+// The corpus is a COPY of okcode's own src/ (the "remote" workspace is a copy
+// of just src/access) — self-contained, so the test runs the same against a
+// linked, built or published okdb. Edits land on the copy, never on a real
+// repo. The name/text/meaning targets below are okcode code with a stable
+// purpose (identity hashing, the base64 shell transfer, the stale-edit check);
+// if one moves, re-anchor the assertion rather than loosen it.
 
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
@@ -22,7 +26,7 @@ const { startSshd } = require('./helpers/sshd');
 
 const OLLAMA = process.env.OLLAMA_URL || 'http://localhost:11434';
 const MODEL = process.env.OKCODE_E2E_MODEL || 'qwen3-embedding:latest';
-const CORPUS = path.join(path.dirname(require.resolve('@kedem/okdb/package.json')), 'src/features/embeddings');
+const CORPUS = path.join(__dirname, '..', 'src');
 
 async function ollamaReady() {
     try {
@@ -61,7 +65,7 @@ describe('e2e: okcode + okdb + Ollama, local and over ssh', async () => {
         localRoot = path.join(base, 'local');
         remoteRoot = path.join(base, 'remote');
         fs.cpSync(CORPUS, localRoot, { recursive: true });
-        fs.cpSync(path.join(CORPUS, 'drivers'), remoteRoot, { recursive: true });
+        fs.cpSync(path.join(CORPUS, 'access'), remoteRoot, { recursive: true });
         sshd = await startSshd();
         oc = await okcode.open({
             path: path.join(base, 'store'),
@@ -92,41 +96,54 @@ describe('e2e: okcode + okdb + Ollama, local and over ssh', async () => {
         for (const w of st) assert.ok(w.files > 0 && w.symbols > 0, JSON.stringify(w));
     });
 
-    it('finds by name, by text, and by meaning', { skip, timeout: 120_000 }, async () => {
+    it('finds by name, by text, and by meaning', { skip, timeout: 120_000 }, async (t) => {
         const local = oc.workspace('local');
-        const byName = await local.find('reconcileMany');
+        const byName = await local.find('findPipeline');
         assert.ok(
-            byName.some((h) => /drivers\/indexer\.js$/.test(h.file || h.rel || '')),
+            byName.some((h) => /(^|\/)identity\.js$/.test(h.file || h.rel || '')),
             JSON.stringify(byName.slice(0, 3)),
         );
 
-        const grep = await tools.render('code_grep', { workspace: 'local', text: 'done_ttl' });
-        assert.match(grep, /embed-jobs\.js/);
+        const grep = await tools.render('code_grep', { workspace: 'local', text: 'restale' });
+        assert.match(grep, /workspace\.js/);
 
         // Semantic: phrased the way a person asks, sharing few tokens with the code.
         const ask = async (q) => (await local.ask(q, { limit: 6 })).map((h) => h.file || h.rel);
-        const deleted = await ask('where are finished background jobs thrown away so they do not pile up');
-        assert.ok(
-            deleted.some((f) => /embed-jobs\.js$/.test(f)),
-            `embed-jobs.js among ${JSON.stringify(deleted)}`,
+        const expect = async (q, re, name) => {
+            const files = await ask(q);
+            t.diagnostic(`${name}: ${JSON.stringify(files)}`);
+            assert.ok(
+                files.some((f) => re.test(f)),
+                `${name} among ${JSON.stringify(files)}`,
+            );
+        };
+        await expect(
+            'how do we know stored vectors came from the same model on the same server so they are never mixed',
+            /(^|\/)identity\.js$/,
+            'identity.js',
         );
-        const encoding = await ask('how is a vector turned into bytes before it is written to disk');
-        assert.ok(
-            encoding.some((f) => /okdb-vector-store\.js$/.test(f)),
-            `okdb-vector-store.js among ${JSON.stringify(encoding)}`,
+        await expect(
+            'how does file content survive being piped through a remote terminal without its characters getting mangled',
+            /access\/shell\.js$/,
+            'access/shell.js',
+        );
+        await expect(
+            'refuse to overwrite a file that somebody changed after I last looked at it',
+            /(^|\/)workspace\.js$/,
+            'workspace.js',
         );
     });
 
     it('edits a remote file through the tools; a stale at is refused', { skip, timeout: 120_000 }, async () => {
-        const read = await tools.render('code_read', { workspace: 'remote', symbol: 'embed-worker.js' });
+        const read = await tools.render('code_read', { workspace: 'remote', symbol: 'shell.js' });
         const at = (read.match(/at=([0-9A-F]{40})/) || [])[1];
         assert.ok(at, read.slice(0, 400));
-        const file = path.join(remoteRoot, 'embed-worker.js');
+        const file = path.join(remoteRoot, 'shell.js');
         const before = fs.readFileSync(file, 'utf8');
 
         const edited = await tools.render('code_edit', {
             workspace: 'remote',
-            file: 'embed-worker.js',
+            file: 'shell.js',
             find: "'use strict';",
             body: "'use strict'; // e2e edit over ssh",
         });
@@ -138,7 +155,7 @@ describe('e2e: okcode + okdb + Ollama, local and over ssh', async () => {
         // The at from before the edit is now stale.
         const stale = await tools.render('code_edit', {
             workspace: 'remote',
-            edits: [{ target: 'embed-worker.js:1-1', body: "'use strict'; // stale" }],
+            edits: [{ target: 'shell.js:1-1', body: "'use strict'; // stale" }],
             at,
         });
         assert.match(stale, /stale|changed since/i, stale);
@@ -149,7 +166,9 @@ describe('e2e: okcode + okdb + Ollama, local and over ssh', async () => {
         await oc.reset('remote', { scope: 'vectors' });
         const e = await until('re-embed of remote', converged(oc, 'remote'), 12 * 60_000);
         assert.equal(e.failed, 0);
-        const hits = await oc.workspace('remote').ask('turn a document into chunks and embed them', { limit: 5 });
+        const hits = await oc
+            .workspace('remote')
+            .ask('send new file contents to the other machine and write them', { limit: 5 });
         assert.ok(hits.length > 0);
     });
 });

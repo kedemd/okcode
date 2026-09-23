@@ -46,7 +46,8 @@ edit (every write validates first and commits atomically)
 
 manage
   status                           files, symbols, full-text and embedder state
-  sync [--force]                   rescan now (--force re-hashes everything)
+  sync [--force] [--no-wait]       rescan now and stay until embeddings are done
+                                   (--force re-hashes everything)
   reset --scope vectors|fts|all    re-embed / rebuild text search / drop and rescan
   embedders                        embedder profiles
   workspaces                       registered workspaces
@@ -73,7 +74,7 @@ const HELP = {
     write: 'okcode write <file> --file text.txt (--create | --at HASH)\n  Create a new file, or replace an existing one whole.',
     check: "okcode check <file>\n  node --check on the target (needs the facade's exec capability).",
     status: 'okcode status\n  Per workspace: files, symbols, full-text state; per embedder profile: done/pending/failed.',
-    sync: 'okcode sync [--force]\n  Rescan changed files now; --force re-hashes everything.',
+    sync: 'okcode sync [--force] [--no-wait]\n  Rescan changed files now and wait until the index — embeddings included — is\n  current, then exit (progress on stderr). --no-wait returns after the rescan;\n  unfinished embedding resumes on the next okcode run. --force re-hashes everything.',
     reset: 'okcode reset --scope vectors|fts|all\n  vectors: re-embed · fts: rebuild text search · all: drop the index and rescan.',
     embedders: 'okcode embedders\n  Embedder profiles known to the store (and --embedder-config).',
     workspaces: 'okcode workspaces\n  Workspaces registered in the store.',
@@ -469,6 +470,10 @@ async function status() {
 async function sync() {
     await openWs();
     const r = await oc.sync(wsId, { force: flags.force === true });
+    // No daemon: this process is what keeps indexing alive, so by default it
+    // stays until the embeddings are current. Any other command leaves
+    // unfinished embedding to be resumed by the next run (cursors are durable).
+    if (flags['no-wait'] !== true) await waitEmbedded();
     if (JSON_OUT) return j(r === undefined ? { ok: true } : r);
     const rows = Array.isArray(r) ? r : r && typeof r === 'object' ? [r] : [];
     if (!rows.length) return out(`synced ${wsId}`);
@@ -478,6 +483,26 @@ async function sync() {
                 ? `synced ${x.id}: ${x.scanned} scanned, ${x.changed || 0} changed, ${x.removed || 0} removed (${x.ms}ms)`
                 : tree(x),
         );
+    }
+}
+
+async function waitEmbedded() {
+    const ws = oc.workspace(wsId);
+    if (!ws || !ws.store || !ws.store.hasProfiles()) return;
+    let last = '';
+    const tick = setInterval(async () => {
+        try {
+            const e = ((await oc.status(wsId)).workspaces[0] || {}).embedders || [];
+            const line = e.map((x) => `${x.name}: ${x.done}/${x.done + x.pending} embedded`).join(', ');
+            if (line && line !== last) err(`# ${(last = line)}`);
+        } catch {
+            /* progress is best effort */
+        }
+    }, 2000);
+    try {
+        await ws.store.settle();
+    } finally {
+        clearInterval(tick);
     }
 }
 

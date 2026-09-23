@@ -37,18 +37,19 @@ Manager: end-to-end over ssh with real okdb, then the brain adapter (separate wo
 
 ## Known gaps
 
+- A named function assigned to `module.exports` (`module.exports = function createX(…)`) is found as `module.exports`, not by its name.
 - Methods of an anonymous `export default { … }` object are not extracted as symbols (the file exports `default` only).
 
 ## Status
 
-| phase                                                                                                                  | status                                                                                                                        |
-| ---------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| docs (README, DESIGN, ACCESS, WORKPLAN)                                                                                | done                                                                                                                          |
-| A1 access                                                                                                              | done (48 tests: localFs, shell/local bash, shell/real ssh; PowerShell + BSD fallbacks ported, unexercised — no pwsh/BSD here) |
-| A2 analysis                                                                                                            | done — `0b25c28` (39 tests; okjs present + absent)                                                                            |
-| A3 okdb batch resolvers                                                                                                | done — okdb `8ed63a5` (`resolveField(…, { batch, batchSize })`, embeddings prefetch)                                          |
-| B1 workspace + store                                                                                                   | done (79 tests; workspace suites on localFs + real ssh; no-content proof; found okdb d195f80)                                 |
-| C1 okcode                                                                                                              | done (11 tests incl. passive cross-process status; secrets-never-on-disk proof)                                               |
-| C2 surfaces                                                                                                            | done (tools 15, CLI 10)                                                                                                       |
-| okdb fixes from okcode (FTS nested txn, pipeline cleanup, cross-process rebuild, resolver-before-open, factory getter) | done in okdb-src; okcode workarounds removed (`6f1a633`)                                                                      |
-| D integration                                                                                                          | —                                                                                                                             |
+| phase                                                                                                                  | status                                                                                                                                   |
+| ---------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| docs (README, DESIGN, ACCESS, WORKPLAN)                                                                                | done                                                                                                                                     |
+| A1 access                                                                                                              | done (48 tests: localFs, shell/local bash, shell/real ssh; PowerShell + BSD fallbacks ported, unexercised — no pwsh/BSD here)            |
+| A2 analysis                                                                                                            | done — `0b25c28` (39 tests; okjs present + absent)                                                                                       |
+| A3 okdb batch resolvers                                                                                                | done — okdb `8ed63a5` (`resolveField(…, { batch, batchSize })`, embeddings prefetch)                                                     |
+| B1 workspace + store                                                                                                   | done (79 tests; workspace suites on localFs + real ssh; no-content proof; found okdb d195f80)                                            |
+| C1 okcode                                                                                                              | done (11 tests incl. passive cross-process status; secrets-never-on-disk proof)                                                          |
+| C2 surfaces                                                                                                            | done (tools 15, CLI 10)                                                                                                                  |
+| okdb fixes from okcode (FTS nested txn, pipeline cleanup, cross-process rebuild, resolver-before-open, factory getter) | done in okdb-src; okcode workarounds removed (`6f1a633`)                                                                                 |
+| D integration                                                                                                          | okcode↔okdb e2e green (`test/e2e-ollama.test.js`: real qwen3-embedding, local + ssh, find/grep/ask/edit/stale/reset); brain adapter next |

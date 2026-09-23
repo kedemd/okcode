@@ -86,17 +86,33 @@ function translateImports(analysis) {
     });
 }
 
-function analyze({ path, source, baseURL = null, importMap = null } = {}) {
-    const t = loadTooling();
-    if (!t) {
-        return {
-            symbols: [],
-            imports: [],
-            exports: [],
-            parsed: false,
-            reason: `okjs tooling unavailable: ${toolingError ? String(toolingError.message).slice(0, 160) : 'unknown'}`,
-        };
-    }
+// `load` is injectable so the tooling-absent branch can be exercised on a
+// machine where @kedem/okjs IS installed (it is a dev dependency here).
+function makeAnalyze(load = loadTooling) {
+    return function analyze({ path, source, baseURL = null, importMap = null } = {}) {
+        const t = load();
+        if (!t) {
+            // Not a parse failure: the file is still JavaScript (or HTML), and
+            // the generic extractor for its language knows how to read that.
+            // `fallback` asks parse.js#extract() to run it; the reason says
+            // what was skipped, so the degraded result is never mistaken for
+            // a full okjs analysis.
+            const why =
+                toolingError && load === loadTooling ? String(toolingError.message).slice(0, 160) : 'not installed';
+            return {
+                symbols: [],
+                imports: [],
+                exports: [],
+                parsed: false,
+                fallback: true,
+                reason: `okjs tooling unavailable (${why}) — okjs-specific analysis skipped`,
+            };
+        }
+        return analyzeWith(t, { path, source, baseURL, importMap });
+    };
+}
+
+function analyzeWith(t, { path, source, baseURL, importMap }) {
     try {
         const analysis = t.analyzeOKSource({
             path,
@@ -129,6 +145,8 @@ function analyze({ path, source, baseURL = null, importMap = null } = {}) {
     }
 }
 
+const analyze = makeAnalyze();
+
 registerExtension({
     id: 'okjs',
     match: (path) => MATCH.test(String(path || '')),
@@ -136,4 +154,4 @@ registerExtension({
     version: toolingVersion(),
 });
 
-module.exports = { analyze, baseURLFor, toolingVersion };
+module.exports = { analyze, makeAnalyze, baseURLFor, toolingVersion };

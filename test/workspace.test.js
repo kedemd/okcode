@@ -273,6 +273,46 @@ for (const fac of facades()) {
             assert.ok(good.ok, JSON.stringify(good));
         });
 
+        it(
+            '`export const` arrow: find → read → edit by name replaces exactly its declaration',
+            { skip: fac.name !== 'localFs' && 'localFs only' },
+            async () => {
+                const { ws, readDisk, writeDisk } = await setup();
+                const head = "import { x } from './x.mjs';\n\n";
+                const decl = [
+                    '// Doubles a number, exported as a const arrow.',
+                    'export const doubleIt = (n) => {',
+                    '    return n * 2;',
+                    '};',
+                ].join('\n');
+                const tail = '\n\nexport const other = 1;\n';
+                writeDisk('lib/exported.mjs', head + decl + tail);
+                await ws.sync();
+
+                const hits = await ws.find('doubleIt');
+                const hit = hits.find((h) => h.name === 'doubleIt');
+                assert.ok(hit, JSON.stringify(hits));
+                assert.equal(hit.file, 'lib/exported.mjs');
+                assert.match(hit.signature || '', /doubleIt\(n\)/);
+
+                const r = await ws.read('doubleIt');
+                assert.ok(r.ok, JSON.stringify(r));
+                const declOnly = decl.slice(decl.indexOf('export const'));
+                assert.equal(r.body.trim(), declOnly);
+
+                const replacement = 'export const doubleIt = (n) => n + n;';
+                const e = await ws.edit('doubleIt', replacement, { at: r.at });
+                assert.ok(e.ok, JSON.stringify(e));
+                assert.equal(
+                    readDisk('lib/exported.mjs'),
+                    head + decl.replace(declOnly, replacement) + tail,
+                    'only the declaration moved; the doc, the import and the neighbour are untouched',
+                );
+                const again = await ws.read('doubleIt');
+                assert.equal(again.body.trim(), replacement);
+            },
+        );
+
         it('editBatch: one snapshot, receipt, diff; old token then stale; overlap and cross-file refused', async () => {
             const { ws, readDisk } = await setup();
             const at1 = (await ws.read('lib/math.js')).at;

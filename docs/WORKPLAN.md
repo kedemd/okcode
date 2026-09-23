@@ -35,10 +35,9 @@ Manager: end-to-end over ssh with real okdb, then the brain adapter (separate wo
 - Tests must be hermetic (temp dirs, throwaway sshd), run per file: `node --test --test-force-exit test/<file>`.
 - Do not commit; the manager reviews and commits.
 
-## Known gaps (kept from brain, pinned by tests — fix later if wanted)
+## Known gaps
 
-- `export const X` is not captured as a symbol; `export * from` is not an import edge.
-- Without okjs installed, `.ok.js` files are `parsed:false` (no acorn fallback).
+- Methods of an anonymous `export default { … }` object are not extracted as symbols (the file exports `default` only).
 
 ## Status
 

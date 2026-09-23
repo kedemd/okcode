@@ -89,10 +89,14 @@ test('an .mjs file parses via the module fallback', () => {
     assert.equal(r.parsed, true, r.reason);
     const s = byPath(r);
     assert.equal(s.get('greet').exported, true);
-    // Ported as-is from the brain: `export const X` (a VariableDeclaration,
-    // which has no `.id`) is not captured as a symbol. Asserted so a change
-    // to that is a decision, not an accident.
-    assert.ok(!s.has('GREETING'));
+    // `export const X` is a symbol like a bare `const`, spanning the whole
+    // export statement (as an exported function's span already does).
+    const g = s.get('GREETING');
+    assert.equal(g.kind, 'const');
+    assert.equal(g.exported, true);
+    assert.equal(ESM.slice(g.start, g.end), "export const GREETING = 'hi';");
+    assert.equal(s.get('greet').signature, 'greet(name)');
+    assert.deepEqual(r.exports, ['GREETING', 'greet']);
 });
 
 test('reaching INSIDE a closure: methods on the object a factory returns', () => {
@@ -124,12 +128,60 @@ test('imports: require edges, ESM imports and re-exports', () => {
         esm.imports.map((i) => [i.from, !!i.reexport]),
         [
             ['./a.js', false],
-            // `export * from` (ExportAllDeclaration) is not recorded as an
-            // edge — the brain extractor's existing behaviour, kept as-is.
+            ['./b.js', true],
             ['./c.js', true],
         ],
     );
     assert.deepEqual(esm.exports, ['d']);
+});
+
+test('export * and export * as ns are re-export edges, shaped like export { x } from', () => {
+    const r = extract('a.mjs', "export * from './m.js';\nexport * as ns from './n.js';\nexport { y } from './o.js';\n");
+    assert.deepEqual(r.imports, [
+        { local: null, from: './m.js', line: 1, esm: true, reexport: true },
+        { local: null, from: './n.js', line: 2, esm: true, reexport: true },
+        { local: null, from: './o.js', line: 3, esm: true, reexport: true },
+    ]);
+    assert.deepEqual(r.exports, ['ns', 'y']);
+});
+
+test('export let/var, multiple declarators, arrow consts, destructuring', () => {
+    const src = [
+        '// Two things at once.',
+        'export const a = 1,',
+        '    b = async (x, { y = 2 } = {}) => {',
+        '        const inner = () => x;',
+        '        return inner();',
+        '    };',
+        'export let c;',
+        'export var d = function () {};',
+        'export const { e, f: g, ...h } = obj;',
+        'const notExported = 3;',
+        '',
+    ].join('\n');
+    const r = extract('m.mjs', src);
+    assert.equal(r.parsed, true, r.reason);
+    const s = byPath(r);
+    const stmt = src.slice(src.indexOf('export const a'), src.indexOf('};') + 2);
+    for (const n of ['a', 'b']) {
+        const x = s.get(n);
+        assert.equal(x.exported, true, n);
+        assert.equal(src.slice(x.start, x.end), stmt, 'declarators share their statement span');
+        assert.equal(x.lineStart, 2);
+        assert.equal(x.lineEnd, 6);
+        assert.match(x.doc, /Two things at once/);
+    }
+    assert.equal(s.get('a').kind, 'const');
+    assert.equal(s.get('a').signature, undefined);
+    assert.equal(s.get('b').kind, 'function');
+    assert.equal(s.get('b').signature, 'async b(x, { y = 2 })');
+    assert.equal(s.get('b.inner').parent, 'b', 'descends into an exported arrow');
+    assert.equal(s.get('c').kind, 'const');
+    assert.equal(src.slice(s.get('c').start, s.get('c').end), 'export let c;');
+    assert.equal(s.get('d').kind, 'function');
+    assert.equal(s.get('d').signature, 'd()');
+    assert.ok(!s.get('notExported').exported);
+    assert.deepEqual(r.exports, ['a', 'b', 'c', 'd', 'e', 'g', 'h']);
 });
 
 test('signatures drop defaults, not everything after the first =', () => {

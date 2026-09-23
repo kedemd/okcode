@@ -62,6 +62,8 @@ okcode find retry --store /data/okcode --id api   # a shared store holding many 
 
 See `okcode --help`.
 
+**Licensing.** Without a license, okdb's free tier covers about three workspaces (5 envs, 2 embeddings pipelines per env). A license goes into okcode's store with `okcode.open({ path, license })` (idempotent — pass it on every open), `okcode --license FILE`, or `OKDB_LICENSE_FILE=FILE` for any process; `status().license` shows what is in effect. A host that passes its own `db` licenses it itself. See [DESIGN §5](docs/DESIGN.md#5-storage).
+
 ## Docs
 
 - [docs/DESIGN.md](docs/DESIGN.md) — what okcode is, its layers, storage, embedders, management surface, and the decisions behind them.

@@ -25,6 +25,9 @@ global flags
   --id NAME                workspace id (default: "default" in <root>/.okcode;
                            the root's basename in a shared --store)
   --embedder-config FILE   embedder profiles (JSON: { "embedders": {...}, "active": "name" })
+  --license FILE           install an okdb license into the store (the license file; its
+                           activation token may follow on a second line). Idempotent.
+                           OKDB_LICENSE_FILE=FILE does the same on every open.
   --json                   machine output
 
 look up
@@ -191,6 +194,32 @@ function embedderConfig() {
     return { embedders, ...(active ? { active } : {}) };
 }
 
+// --license FILE: the CLI hands okcode its own db, so it installs the license
+// itself (what okcode.open({ path, license }) does for a library host).
+async function installLicense() {
+    const file = need(flags.license, '--license needs a license file');
+    let text;
+    try {
+        text = fs.readFileSync(String(file), 'utf8');
+    } catch (e) {
+        fail(`--license ${file}: ${e.message}`);
+    }
+    let r;
+    try {
+        r = await db.licenses.add(text);
+    } catch (e) {
+        fail(`--license ${file}: ${e.code ? `${e.code}: ` : ''}${e.message}`);
+    }
+    if (r.needsActivation) {
+        err(
+            `# license ${r.id} needs activation on this node: send PIN ${r.pin} to the vendor, ` +
+                'then append its token to the license file (second line) and pass --license again',
+        );
+    } else if (r.changed) {
+        err(`# license installed: ${r.type}${r.licensee ? ` (${r.licensee})` : ''}`);
+    }
+}
+
 let oc = null;
 let db = null;
 async function openOkcode() {
@@ -215,6 +244,7 @@ async function openOkcode() {
         );
     }
     await db.open();
+    if (flags.license !== undefined) await installLicense();
     oc = await okcode.open({
         db,
         ...(embedders ? { embedders } : {}),

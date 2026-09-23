@@ -48,7 +48,7 @@ The brain moves onto okcode only AFTER both are published (the brain's own seque
 
 - A named function assigned to `module.exports` (`module.exports = function createX(…)`) is found as `module.exports`, not by its name.
 - Methods of an anonymous `export default { … }` object are not extracted as symbols (the file exports `default` only).
-- License pass-through (`okcode.open({ path, license })`) is blocked on okdb: okdb has no public API to install a license programmatically (only the private `db._license.addLicense`, the `okdb license` CLI and the admin HTTP route, which all reach into the same private checker). Until okdb exposes one, a host licenses okcode's store with `okdb license <file> --path <store>` before first open.
+- Licensing is done (okdb `db.licenses` + `OKDB_LICENSE_FILE`; okcode `open({ path, license })`, `status().license`, CLI `--license`) — DESIGN §5. okcode has no activate call of its own: a node-bound license is activated with `oc.db.licenses.activate(token)` on the live store, or by reopening with `{ blob, activation }`.
 
 ## Status
 

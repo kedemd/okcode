@@ -44,6 +44,14 @@ okcode keeps its own okdb store (`open({ path })`), or uses one the host passes 
 - **Hosts with many workspaces** (the brain): one shared store at the host's chosen path (e.g. `/data/okcode` beside `/data/brain`), one env per workspace. Several processes may open it (okdb is multi-process on one path); the one holding the processing roles indexes and embeds. Every process that touches a workspace registers it (`addWorkspace`) so its access facade and resolvers exist there.
 - Idle cost: an inactive workspace's vector index unloads after 5 minutes (okdb local views); the rest of an open env's footprint is small. Env residency (close idle envs) was considered and deferred as over-optimization. **Never two okdb instances on one path in one process** — the brain measured a native deadlock doing that; a host that already has an okdb open on the same path must pass `db`.
 
+**Licensing.** okdb licenses live in the store (okdb's `~system` env), not in okcode. Unlicensed, okdb's free tier covers about three workspaces: `envs` 5 counts `default` + the `okcode` management env + one env per workspace (a pipeline's internal `~…` envs are not counted), and `pipelinesPerEnv` 2 allows two embedder profiles per workspace (or one plus the orphan a model switch leaves). Past that, the store needs a license:
+
+- `open({ path, license })` installs it with `db.licenses.add(license)` right after okdb opens and before the management env, workspaces or pipelines are created. `license` is the license text (a blob, `"<blob>\n<token>"`) or `{ blob, activation }`; it is idempotent, so passing it on every open is fine. An invalid license refuses the open (okdb's `LICENSE_INVALID`, the store closed again).
+- A standard (node-bound) license needs a one-time activation: the open still succeeds (free tier until then), a warning names the PIN, and `status().license` is `{ status: 'needs-activation', id, pin, … }`. The host sends the PIN to the vendor, then applies the token with `oc.db.licenses.activate(token)` (live) or reopens with `{ blob, activation }`.
+- `open({ db })`: the host owns licensing; `license` is ignored (with a warning).
+- okdb itself installs `OKDB_LICENSE_FILE` at every open, so a host that sets it (the brain does) needs no okcode code at all.
+- `status().license` = `{ status: 'active' | 'free' | 'needs-activation', type, licensee, expiresAt, enforced, id?, pin? }` — never the license text. The CLI takes `--license FILE`.
+
 **One okdb environment per workspace**: `okcode_<slug>` — the id lowercased to `[a-z0-9_]` (≤ 40 chars), plus `_<sha1(id)[:8]>` whenever slugging changed it, so `App`/`app` never collide. (Not `okcode:<id>`: okdb splits scoped engine names at the first `:`, and a leading `~` is reserved for okdb's own envs.) Removing a workspace = one `removeEnvironment`. Nothing mixes with host data.
 
 Types inside a workspace env:
@@ -112,17 +120,17 @@ okcode.open({
 
 Library, CLI and (optionally) tools expose the same operations:
 
-| operation                                                                          | effect                                                                                            |
-| ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| `status()`                                                                         | per workspace: files, symbols, FTS state; per embedder profile: done/pending/failed, dims, active |
-| `ws.sync({ force })`                                                               | rescan now (changed files; `force` = re-hash everything)                                          |
-| `reset(id, { scope })`                                                             | `'vectors'` re-embed · `'fts'` rebuild text search · `'all'` drop the env and rescan              |
-| `addEmbedder(name, cfg)` / `useEmbedder(name)` / `removeEmbedder(name)`            | build a profile alongside; switch queries once it is ready; drop its vectors                      |
-| `ws.ask(q, { profile })`, `compare(id, q, [a, b])`                                 | query one profile / several side by side; `q` is a string or `{ text?, vector, identity? }`       |
-| `embedders()`                                                                      | `[{ name, type, endpoint, model, dims, identity, active, state }]` — no functions, no secrets     |
-| `removeOrphaned(id?)`                                                              | drop stores no profile addresses any more (`status().workspaces[].orphaned`)                      |
-| `ws.files({ dir, lang, limit, stat })` / `ws.symbols(file, { kind, limit, stat })` | cheap listings from the stored rows — never read file content (below)                             |
-| `addWorkspace(id, { access })` / `removeWorkspace(id)`                             | register (and scan) / drop the env                                                                |
+| operation                                                                          | effect                                                                                                            |
+| ---------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `status()`                                                                         | per workspace: files, symbols, FTS state; per embedder profile: done/pending/failed, dims, active; `license` (§5) |
+| `ws.sync({ force })`                                                               | rescan now (changed files; `force` = re-hash everything)                                                          |
+| `reset(id, { scope })`                                                             | `'vectors'` re-embed · `'fts'` rebuild text search · `'all'` drop the env and rescan                              |
+| `addEmbedder(name, cfg)` / `useEmbedder(name)` / `removeEmbedder(name)`            | build a profile alongside; switch queries once it is ready; drop its vectors                                      |
+| `ws.ask(q, { profile })`, `compare(id, q, [a, b])`                                 | query one profile / several side by side; `q` is a string or `{ text?, vector, identity? }`                       |
+| `embedders()`                                                                      | `[{ name, type, endpoint, model, dims, identity, active, state }]` — no functions, no secrets                     |
+| `removeOrphaned(id?)`                                                              | drop stores no profile addresses any more (`status().workspaces[].orphaned`)                                      |
+| `ws.files({ dir, lang, limit, stat })` / `ws.symbols(file, { kind, limit, stat })` | cheap listings from the stored rows — never read file content (below)                                             |
+| `addWorkspace(id, { access })` / `removeWorkspace(id)`                             | register (and scan) / drop the env                                                                                |
 
 **Querying with a precomputed vector.** A host that embeds each question once and shares the vector across several indexes passes it instead of the text: `ws.ask({ vector, text?, identity? }, opts)` (also `store.ask`, `compare`, and the `code_ask` tool's `vector`/`identity` args — host-only, not in the model-facing schema). `vector` is a `Float32Array` (a number array is accepted). With a vector **no embed call is made** for the query. The lexical eyes (names, doc prose, file text) need words: with a vector and no `text` the answer is semantic hits only; with both, the three eyes fuse exactly as for a string. The vector must have the profile's dims (`OKCODE_DIMS_MISMATCH`, never searched); when the host passes the `identity` it computed the vector in, it must equal the profile's (`OKCODE_IDENTITY_MISMATCH`). A host decides compatibility up front by comparing its identity with `embedders()[i].identity` and passes a vector only on a match. A query with neither text nor vector is `OKCODE_BAD_QUERY`.
 
@@ -138,6 +146,7 @@ Notes: `reset('fts')` needs the workspace **open** in this process (the content 
 
 - Which workspaces exist and where (workspace memories → `addWorkspace(key, { access })`), including building the facade: local → `localFs`, remote machine → `shell({ run: sshDriver })`.
 - When to sync (cycle open), secrets (`apiKey` functions), recording stats in its own memory.
+- Licensing (§5): the host supplies the license — `open({ path, license })`, or on its own `db` when it passes one. The brain's existing `OKDB_LICENSE_FILE` (inherited by its child processes) already covers okcode's store: okdb installs it at every open, with no okcode code.
 - Its model-facing tool names/policy (it may use `okcode/tools` renderers or its own).
 
 ## 11. Compatibility

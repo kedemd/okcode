@@ -35,14 +35,19 @@ Manager: end-to-end over ssh with real okdb, then the brain adapter (separate wo
 - Tests must be hermetic (temp dirs, throwaway sshd), run per file: `node --test --test-force-exit test/<file>`.
 - Do not commit; the manager reviews and commits.
 
+## Known gaps (kept from brain, pinned by tests — fix later if wanted)
+
+- `export const X` is not captured as a symbol; `export * from` is not an import edge.
+- Without okjs installed, `.ok.js` files are `parsed:false` (no acorn fallback).
+
 ## Status
 
 | phase | status |
 | --- | --- |
 | docs (README, DESIGN, ACCESS, WORKPLAN) | done |
-| A1 access | — |
-| A2 analysis | — |
-| A3 okdb batch resolvers | — |
+| A1 access | done (48 tests: localFs, shell/local bash, shell/real ssh; PowerShell + BSD fallbacks ported, unexercised — no pwsh/BSD here) |
+| A2 analysis | done — `0b25c28` (39 tests; okjs present + absent) |
+| A3 okdb batch resolvers | done — okdb `8ed63a5` (`resolveField(…, { batch, batchSize })`, embeddings prefetch) |
 | B1 workspace + store | — |
 | C1 okcode | — |
 | C2 surfaces | — |

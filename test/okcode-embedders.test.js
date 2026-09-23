@@ -81,19 +81,15 @@ describe('embedder profiles', () => {
     const keyCalls = { n: 0 };
     const customCalls = { single: 0, batch: 0 };
 
-    before(async () => {
-        base = tmpRoot('ocemb').base;
-        root = path.join(base, 'src');
-        dbPath = path.join(base, 'okdb');
-        writeFixture(root);
-        fs.writeFileSync(path.join(root, 'lib', 'retry.js'), RETRY_JS);
-        db = new OKDB(dbPath, { auth: { open: true } });
-        // A "built-in" provider as okdb sees one: a registered factory type.
-        db.embeddings.registerEmbedderFactory('bow', (cfg) => ({
+    // A db with the fake providers registered: 'bow' (a "built-in" provider
+    // as okdb sees one — a registered factory type) and 'keyed' (needs an api
+    // key; stands in for 'openai').
+    async function openDb(dir) {
+        const d = new OKDB(dir, { auth: { open: true } });
+        d.embeddings.registerEmbedderFactory('bow', (cfg) => ({
             embed: async (t) => (Array.isArray(t) ? t.map((x) => bow(x, cfg.dims || 8)) : bow(t, cfg.dims || 8)),
         }));
-        // A provider that needs an api key (stands in for 'openai').
-        db.embeddings.registerEmbedderFactory('keyed', (cfg) => {
+        d.embeddings.registerEmbedderFactory('keyed', (cfg) => {
             if (!cfg.api_key) throw new Error('keyed: api_key required');
             return {
                 embed: async (t) => {
@@ -106,7 +102,34 @@ describe('embedder profiles', () => {
                 },
             };
         });
-        await db.open();
+        await d.open();
+        return d;
+    }
+
+    // Three profiles on one workspace are three pipelines in its env. An
+    // unlicensed okdb with enforcement on (the published build) allows 2, and
+    // the published bundle trusts only the vendor key, so no test license can
+    // be installed: those tests skip there, and run on a dev build or under a
+    // license.
+    const pipelineCap = () => {
+        const eff = db.licenses.effective();
+        const cap = eff.limits && eff.limits.pipelinesPerEnv;
+        return eff.enforced && typeof cap === 'number' && cap < 3 ? cap : null;
+    };
+    const skipIfCapped = (t) => {
+        const cap = pipelineCap();
+        if (cap === null) return false;
+        t.skip(`3 embedder profiles need 3 pipelines per env; this okdb enforces pipelinesPerEnv ${cap} (free tier)`);
+        return true;
+    };
+
+    before(async () => {
+        base = tmpRoot('ocemb').base;
+        root = path.join(base, 'src');
+        dbPath = path.join(base, 'okdb');
+        writeFixture(root);
+        fs.writeFileSync(path.join(root, 'lib', 'retry.js'), RETRY_JS);
+        db = await openDb(dbPath);
     });
     after(async () => {
         await db.close().catch(() => {});
@@ -140,7 +163,8 @@ describe('embedder profiles', () => {
         },
     });
 
-    it('builds every profile; ask follows the active one; the apiKey function is called, never stored', async () => {
+    it('builds every profile; ask follows the active one; the apiKey function is called, never stored', async (t) => {
+        if (skipIfCapped(t)) return;
         const oc = await okcode.open({ db, embedders: PROFILES(), active: 'small' });
         try {
             const ws = await oc.addWorkspace('app', { access: localFs(root) });
@@ -195,7 +219,9 @@ describe('embedder profiles', () => {
         assert.equal(typeof rec.fields, 'object');
     });
 
-    it('a persisted profile whose function was not supplied again is needs-config, not dropped', async () => {
+    it('a persisted profile whose function was not supplied again is needs-config, not dropped', async (t) => {
+        // Builds on the three profiles the previous test persisted.
+        if (skipIfCapped(t)) return;
         // Only 'small' re-supplied: 'secret' (apiKey fn) and 'custom' (embed fn)
         // come from the store alone.
         const oc = await okcode.open({ db, embedders: { small: PROFILES().small } });
@@ -239,6 +265,9 @@ describe('embedder profiles', () => {
     });
 
     it('addEmbedder builds alongside; removeEmbedder drops its pipeline and vectors', async () => {
+        // Its own db: two profiles, two pipelines — within an unlicensed
+        // okdb's pipelinesPerEnv, whatever the tests above left behind.
+        const db = await openDb(path.join(base, 'okdb-add'));
         const oc = await okcode.open({ db, embedders: { small: PROFILES().small } });
         try {
             const ws = await oc.addWorkspace('app', { access: localFs(root) });
@@ -275,6 +304,7 @@ describe('embedder profiles', () => {
             await assert.rejects(oc.removeEmbedder('wide'), { code: 'OKCODE_UNKNOWN_EMBEDDER' });
         } finally {
             await oc.close();
+            await db.close();
         }
     });
 

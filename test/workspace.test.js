@@ -16,30 +16,31 @@ const { writeFixture, FIXTURE_FILES, tmpRoot, facades } = require('./fixtures/co
 
 for (const fac of facades()) {
     describe(`workspace over ${fac.name}`, { skip: fac.skip }, () => {
-        let db;
-        let dbBase;
         const cleanups = [];
         let n = 0;
 
         before(async () => {
             if (fac.before) await fac.before();
-            dbBase = tmpRoot('db').base;
-            db = new OKDB(path.join(dbBase, 'okdb'), { auth: { open: true } });
-            await db.open();
         });
         after(async () => {
             for (const c of cleanups) await c().catch(() => {});
-            await db.close();
-            fs.rmSync(dbBase, { recursive: true, force: true });
             if (fac.after) await fac.after();
         });
 
-        // A fresh fixture, facade, store env and workspace per test.
+        // A fresh fixture, facade, okdb store and workspace per test. Each test
+        // gets its own okdb (≈30ms to open) rather than one env apiece in a
+        // shared one: every workspace is an okdb env, and an unlicensed okdb
+        // allows 5 (incl. default) — a shared store would stop at test 5.
         async function setup({ store = true } = {}) {
             const { base, root } = tmpRoot();
             writeFixture(root);
             const access = fac.make(root);
             const id = `ws-${++n}`;
+            let db = null;
+            if (store) {
+                db = new OKDB(path.join(base, 'okdb'), { auth: { open: true } });
+                await db.open();
+            }
             const st = store ? await openStore({ db, id, access }) : null;
             const ws = await openWorkspace({ id, access, store: st });
             const file = (rel) => path.join(root, ...rel.split('/'));
@@ -49,9 +50,10 @@ for (const fac of facades()) {
                 fs.writeFileSync(file(rel), text);
             };
             cleanups.push(async () => {
-                // The db dir is deleted whole after the suite; removing each env
-                // (≈1.2s of okdb close grace apiece) is covered by the store suite.
+                // The db dir is deleted whole; removing each env (≈1.2s of okdb
+                // close grace apiece) is covered by the store suite.
                 await ws.close();
+                if (db) await db.close();
                 fs.rmSync(base, { recursive: true, force: true });
             });
             return { root, ws, st, access, file, readDisk, writeDisk };

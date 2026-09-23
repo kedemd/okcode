@@ -9,7 +9,8 @@
     "files": [
         "src",
         "bin",
-        "docs",
+        "docs/ACCESS.md",
+        "docs/DESIGN.md",
         "README.md"
     ],
     "scripts": {
@@ -19,7 +20,7 @@
         "node": ">=20"
     },
     "dependencies": {
-        "@kedem/okdb": "file:../okdb-src",
+        "@kedem/okdb": "^2.3.0",
         "acorn": "^8.18.0"
     },
     "peerDependencies": {
@@ -30,9 +31,11 @@
             "optional": true
         }
     },
-    "license": "UNLICENSED",
-    "private": true,
+    "license": "MIT",
     "devDependencies": {
         "@kedem/okjs": "~1.3.1"
+    },
+    "publishConfig": {
+        "access": "public"
     }
 }

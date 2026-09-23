@@ -8,7 +8,7 @@ okcode ships two implementations (`okcode.access.localFs`, `okcode.access.shell`
 
 - **Async.** Every method returns a Promise. (The brain's original access layer was synchronous; remote transports are not.)
 - **Batched.** Methods that take paths take many — one round trip per call, not per file. A remote facade must not turn a batch into N round trips if it can avoid it.
-- **Paths are workspace-relative**, `/`-separated, no leading `/`, never containing `..` segments (`src/loop.js`). The facade maps them to its root. A facade MUST reject a path that escapes its root.
+- **Paths are workspace-relative**, `/`-separated, no leading `/`, never containing `..` segments (`src/loop.js`). The facade maps them to its root. A facade MUST reject a path that escapes its root. Rejection is lexical (`..`, absolute, drive letters, NUL); a symlinked directory inside the workspace is followed.
 - **Bytes, not text.** Content is `Buffer`. Text decoding is okcode's job, so a transport that mangles encodings (console codepages) cannot corrupt a file.
 - **Hashes** are uppercase hex SHA-1 of the file's bytes. They are computed **where the file is** (a remote facade hashes remotely — never pulls bytes just to hash them).
 - **mtime** is a number, compared only for equality against earlier values from the same facade (any stable unit; it is never interpreted as a date).
@@ -17,11 +17,11 @@ okcode ships two implementations (`okcode.access.localFs`, `okcode.access.shell`
 
 ### `list({ skip }) → [{ path, size, mtime }]`
 
-Every regular file under the root. `skip` is a list of directory names to prune at any depth (default: `node_modules .git .idea dist build coverage .next vendor`). Dot-directories below the root are pruned. Unreadable entries are skipped, never fatal — one locked file must cost that file, not the listing. No hashing.
+Every regular file under the root. `skip` is a list of directory names to prune at any depth (default: `node_modules .git .idea dist build coverage .next vendor`); it matches directories only (a *file* named `dist` is listed). Dot-directories below the root are pruned. Symlinks are neither followed nor listed. Unreadable entries are skipped, never fatal — one locked file must cost that file, not the listing. No hashing.
 
 ### `stat(paths, { hash = false }) → Map<path, { size, mtime, hash? } | { missing: true }>`
 
-Metadata for named files; `hash: true` adds the content hash. A path that is absent or not a regular file (directories, broken links) is `{ missing: true }`.
+Metadata for named files; `hash: true` adds the content hash. A path that is absent or not a regular file (directories, broken links) is `{ missing: true }`; with `hash: true`, so is a file that cannot be read. `stat` and `read` follow a symlink to a regular file.
 
 ### `read(paths) → Map<path, Buffer>`
 
@@ -45,10 +45,10 @@ The only write. Atomic for one file: readers see the old bytes or the new bytes,
 | `exists` | `create` but the path exists; nothing written |
 | `missing` | replace but the path does not exist; nothing written |
 | `symlink` | the target is a symlink/reparse point; refused |
-| `noatomic` | the facade cannot publish atomically here (e.g. temp and target on different devices); nothing written |
+| `noatomic` | the facade cannot publish atomically here (e.g. temp and target on different devices); nothing written; `error` may say why (`mkdir`, `write`, `link`, `device`, `rename`) |
 | `response-lost` | the transport failed after sending; the write may or may not have happened — okcode re-reads to find out |
 
-Replace preserves the target's permission bits. Implementations write a temp file in the target's directory and rename it into place.
+Replace preserves the target's permission bits. Implementations write a temp file in the target's directory and rename it into place. The shell facade also sends the payload's hash and verifies it on the target before publishing: bytes damaged in transit come back as `response-lost` (`error: 'payload corrupted in transit; nothing was written'`), never as a written file.
 
 ## Optional capabilities
 
@@ -56,11 +56,11 @@ okcode checks for these and degrades without them.
 
 ### `lock(path, id) → { ok: true, release() } | { ok: false, reason }`
 
-Advisory, cross-process lock around a commit (narrows the window between the compare and the rename against another okcode writer). Without it, `commit`'s compare-and-swap is the only guard.
+Advisory, cross-process lock around a commit (narrows the window between the compare and the rename against another okcode writer). Without it, `commit`'s compare-and-swap is the only guard. `release()` returns a Promise. The lock records the caller's `{ pid, host, startTime, id }`; a stale lock is broken only when its recorded host is the machine holding the files and its pid is provably dead there — never on elapsed time. A lock recorded by another host is always `locked` (release it manually).
 
 ### `exec(command) → { ok, out }`
 
-Run a command in the workspace root (`out` = stdout, or stdout+stderr on failure). Used only for opt-in checks (e.g. `node --check` on the target machine). **A capability, not a default:** a host grants it per workspace; okcode never needs it to find, read or edit.
+Run a command in the workspace root (`out` = stdout, or stdout+stderr on failure; PowerShell merges stderr into `out`). Used only for opt-in checks (e.g. `node --check` on the target machine). **A capability, not a default:** a host grants it per workspace; okcode never needs it to find, read or edit.
 
 ### `remove(paths) → void`
 

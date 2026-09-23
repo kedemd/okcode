@@ -19,6 +19,15 @@
 // passive process (a CLI next to a running service); the process holding the
 // roles does the work. okcode never assumes the caller embeds.
 //
+// LICENSING. okdb licenses live in the store (okdb's ~system env). With
+// `open({ path, license })` okcode installs the license right after okdb opens
+// and before it creates anything (db.licenses.add — idempotent, so passing it
+// on every open is fine). With `open({ db })` the host owns licensing and
+// `license` is ignored. okdb itself also installs OKDB_LICENSE_FILE at open(),
+// so a host that sets that variable needs neither. A standard (node-bound)
+// license needs a one-time activation: okcode does not fail — status().license
+// reports { status: 'needs-activation', pin }.
+//
 // ONE INSTANCE PER PATH PER PROCESS. `open({ path })` opens okcode's own
 // okdb; a host that already holds an okdb on that path must pass `db`
 // instead (two instances on one path in one process deadlock natively).
@@ -59,10 +68,32 @@ async function openOrCreateEnv(db, name) {
     }
 }
 
+// A short, secret-free summary of what okdb has in effect (status().license).
+// null on an okdb without the public license API.
+function licenseSummary(db) {
+    const lic = db.licenses;
+    if (!lic || typeof lic.effective !== 'function') return null;
+    try {
+        const e = lic.effective();
+        const pending = e.free ? lic.list().find((l) => l.needsActivation) || null : null;
+        return {
+            status: e.free ? (pending ? 'needs-activation' : 'free') : 'active',
+            type: e.type,
+            licensee: e.licensee,
+            expiresAt: e.expiresAt,
+            enforced: e.enforced,
+            ...(pending ? { id: pending.id, pin: pending.pin } : {}),
+        };
+    } catch {
+        return null;
+    }
+}
+
 async function open({
     path = null,
     db = null,
     role = null,
+    license = null,
     embedders: hostProfiles = {},
     active = null,
     workspace: workspaceDefaults = {},
@@ -78,8 +109,27 @@ async function open({
         for (const k of ['processors', 'engines', 'compaction']) if (k in r) flags[k] = r[k];
         db = new OKDB(path, flags);
         await db.open();
+        if (license != null) {
+            // Before the management env, workspaces or pipelines exist, so none of
+            // them is created under the free tier's limits.
+            let installed;
+            try {
+                installed = await db.licenses.add(license);
+            } catch (err) {
+                await db.close().catch(() => {});
+                throw err;
+            }
+            if (installed.needsActivation) {
+                L.warn(
+                    `[okcode] license ${installed.id} needs activation on this node: send PIN ${installed.pin} ` +
+                        'to the vendor, then pass { license: { blob, activation } } (running on the free tier until then)',
+                );
+            }
+        }
     } else if (typeof db.env !== 'function' || typeof db.openEnv !== 'function') {
         throw new Error('okcode.open: db must be an open okdb instance');
+    } else if (license != null) {
+        L.warn('[okcode] `license` ignored: a host-supplied db owns its licensing (db.licenses.add)');
     }
 
     let meta;
@@ -510,6 +560,7 @@ async function open({
             active: activeName,
             embedders: [...profiles.values()].map(profileEntry),
             role: db.role ? { processors: db.role.processors !== false, engines: db.role.engines !== false } : null,
+            license: licenseSummary(db),
         };
     }
 

@@ -334,11 +334,18 @@ function createTools({ workspace, workspaces = () => [] } = {}) {
 
     async function codeAsk(ws, a) {
         const q = String(a.question || a.query || '');
-        if (!q) return '(code_ask) — needs `question`: what the code you are looking for DOES, in your own words.';
+        // A HOST (never the model — it is not in the schema) may hand over
+        // the question already embedded: `vector` (+ `identity`, the space
+        // it came from). It is searched as-is, with no embed call; the
+        // question text still drives the name/text eyes.
+        const vector = a.vector != null ? a.vector : null;
+        if (!q && !vector)
+            return '(code_ask) — needs `question`: what the code you are looking for DOES, in your own words.';
         const profile = a.embedder || a.profile || null;
+        const query = vector ? { text: q || undefined, vector, identity: a.identity || undefined } : q;
         let hits;
         try {
-            hits = await ws.ask(q, { limit: Number(a.limit) || 10, profile, embedder: profile });
+            hits = await ws.ask(query, { limit: Number(a.limit) || 10, profile, embedder: profile });
         } catch (err) {
             if (err && err.code === 'OKCODE_NO_EMBEDDINGS') {
                 return `(code_ask "${q}") — ${ws.id} has no semantic index (no embedder configured). Use code_find for names and doc prose, or code_grep for exact text.`;
@@ -351,7 +358,7 @@ function createTools({ workspace, workspaces = () => [] } = {}) {
         // you asked" are different claims and the caller should be able to
         // tell them apart.
         return (
-            `Answering "${q}" from ${ws.id}:\n` +
+            `Answering ${q ? `"${q}"` : 'a query vector'} from ${ws.id}:\n` +
             hits
                 .map((h) => {
                     const where = `${h.file}:${h.lines}`;

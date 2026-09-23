@@ -38,6 +38,16 @@ await ws.sync();
 const hits = await ws.find('retryWithBackoff');
 const { text, at } = await ws.read('retryWithBackoff');
 await ws.edit('retryWithBackoff', newBody, { at });
+
+// Semantic search; or with a vector the host already embedded (no embed call),
+// once its identity — [type, endpoint, model, dims] — matches the profile's
+const { identity } = oc.embedders().find((e) => e.active);
+await ws.ask('where do we retry failed requests');
+await ws.ask({ text: 'where do we retry failed requests', vector, identity });
+
+// Listings from the index alone — no file content is read
+await ws.files({ dir: 'src' }); // sizes, lines, languages, symbol counts
+await ws.symbols('src/http.js'); // the stored symbol table of one file
 ```
 
 CLI — run it in a folder; the index lives in `.okcode/` there (workspace `default`), created and kept current automatically:

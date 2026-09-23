@@ -82,13 +82,27 @@ okcode.open({
     embedders: {
         qwen:  { type: 'ollama', model: 'qwen3-embedding:0.6b', url },              // okdb built-in driver
         oa3:   { type: 'openai', model: 'text-embedding-3-small', apiKey: () => … }, // secret supplied at runtime
-        local: { embed: async (texts) => vectors, dims: 768 },                       // anything custom
+        local: { embed: async (texts) => vectors, id: 'my-embedder@2', dims: 768 },  // anything custom
     },
     active: 'qwen',
 });
 ```
 
-- Each named **profile** gets its own okdb pipeline per workspace, named after the profile's _model and dims_ (vectors from two models are not comparable — the name makes mixing impossible).
+- Each named **profile** gets its own okdb pipeline per workspace, addressed by the profile's **identity** — the vector space it embeds into (`src/identity.js`):
+
+    `identity = JSON.stringify([type, endpoint, model, dims])`
+
+    | part       | built-in provider                                      | custom `embed`                  |
+    | ---------- | ------------------------------------------------------ | ------------------------------- |
+    | `type`     | the provider (`'ollama'`, `'openai'`, a factory type)  | `'custom'`                      |
+    | `endpoint` | its `url` / `base_url` (`''` = the provider's default) | the profile's required **`id`** |
+    | `model`    | `model` (`''` when unset)                              | `model` (`''` when unset)       |
+    | `dims`     | the vector length (given, or learned from the model)   | same                            |
+
+    The pipeline is named `code_<slug(model)>_<dims>_<sha1(identity)[:8]>` — readable parts for a person scanning okdb's admin, and a hash of the whole identity that actually separates spaces. Vectors from two spaces are not comparable, and a store that mixes them returns nonsense while looking healthy — so the same model name at two endpoints (ollama vs an OpenAI-compatible server), or a model swapped behind the same name on another host, is **two stores**, and changing any part of a profile addresses a **new** store: old vectors are never served for the new space. Reopening with an unchanged profile computes the same name and keeps its store (nothing re-embedded). The identity string has the same shape the brain computes from its own embedder config, so a host decides by plain equality whether a vector it holds lives in okcode's space; there is no normalisation (`http://h:11434` ≠ `http://h:11434/`). `apiKey` and other provider fields are not part of it; a keyed profile's identity names the provider, not okcode's derived factory type.
+
+- **Custom profiles must name their space**: `id` is required (`OKCODE_NEEDS_ID` without it). okcode cannot inspect what a function embeds into, so the host says — change `id` whenever the function starts producing different vectors. The profile _name_ is deliberately not part of the identity: it is the host's handle for switching profiles, not a statement about the vectors.
+- **Orphans.** A store no profile addresses any more (its profile's url/model/dims changed, or it was named by an older scheme) is not deleted behind the host's back — another process may still be configured for it — but it is not served either. `status()` lists it per workspace under `orphaned: [{ pipeline, done, vectors }]`, and `removeOrphaned(id?)` drops it (its indexer otherwise keeps embedding changes against the old embedder). There was no released okcode before identity naming, so there is no migration: stores named `code_<model>_<dims>` simply show up as orphaned.
 - `apiKey` may be a function, so secrets stay in the host (never written to okdb). A plain string is accepted and stored by okdb (masked in its admin UI).
 - A custom `embed` is registered as an okdb embedder factory, so okdb's batching, content-hash dedupe and retries apply unchanged.
 - Profiles are independent: adding one builds its vectors alongside; symbols, FTS and file rows are shared.
@@ -98,18 +112,25 @@ okcode.open({
 
 Library, CLI and (optionally) tools expose the same operations:
 
-| operation                                                               | effect                                                                                            |
-| ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| `status()`                                                              | per workspace: files, symbols, FTS state; per embedder profile: done/pending/failed, dims, active |
-| `ws.sync({ force })`                                                    | rescan now (changed files; `force` = re-hash everything)                                          |
-| `reset(id, { scope })`                                                  | `'vectors'` re-embed · `'fts'` rebuild text search · `'all'` drop the env and rescan              |
-| `addEmbedder(name, cfg)` / `useEmbedder(name)` / `removeEmbedder(name)` | build a profile alongside; switch queries once it is ready; drop its vectors                      |
-| `ws.ask(q, { embedder })`, `compare(q, [a, b])`                         | query one profile / several side by side                                                          |
-| `addWorkspace(id, { access })` / `removeWorkspace(id)`                  | register (and scan) / drop the env                                                                |
+| operation                                                                          | effect                                                                                            |
+| ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `status()`                                                                         | per workspace: files, symbols, FTS state; per embedder profile: done/pending/failed, dims, active |
+| `ws.sync({ force })`                                                               | rescan now (changed files; `force` = re-hash everything)                                          |
+| `reset(id, { scope })`                                                             | `'vectors'` re-embed · `'fts'` rebuild text search · `'all'` drop the env and rescan              |
+| `addEmbedder(name, cfg)` / `useEmbedder(name)` / `removeEmbedder(name)`            | build a profile alongside; switch queries once it is ready; drop its vectors                      |
+| `ws.ask(q, { profile })`, `compare(id, q, [a, b])`                                 | query one profile / several side by side; `q` is a string or `{ text?, vector, identity? }`       |
+| `embedders()`                                                                      | `[{ name, type, endpoint, model, dims, identity, active, state }]` — no functions, no secrets     |
+| `removeOrphaned(id?)`                                                              | drop stores no profile addresses any more (`status().workspaces[].orphaned`)                      |
+| `ws.files({ dir, lang, limit, stat })` / `ws.symbols(file, { kind, limit, stat })` | cheap listings from the stored rows — never read file content (below)                             |
+| `addWorkspace(id, { access })` / `removeWorkspace(id)`                             | register (and scan) / drop the env                                                                |
 
-Notes: `reset('fts')` needs the workspace **open** in this process (the content index reads through its access facade); `'vectors'` works from any process. `sync()` returns `[{ id, scanned, changed, removed, ms }]`. `compare()` returns raw per-profile vector hits (not the merged `ask` results, which would hide the differences). Error codes: `OKCODE_UNKNOWN_WORKSPACE`, `OKCODE_WORKSPACE_NOT_OPEN`, `OKCODE_UNKNOWN_EMBEDDER`, `OKCODE_EMBEDDER_EXISTS`, `OKCODE_NEEDS_CONFIG`, `OKCODE_UNKNOWN_EMBEDDER_TYPE`, `OKCODE_NO_EMBEDDINGS`.
+**Querying with a precomputed vector.** A host that embeds each question once and shares the vector across several indexes passes it instead of the text: `ws.ask({ vector, text?, identity? }, opts)` (also `store.ask`, `compare`, and the `code_ask` tool's `vector`/`identity` args — host-only, not in the model-facing schema). `vector` is a `Float32Array` (a number array is accepted). With a vector **no embed call is made** for the query. The lexical eyes (names, doc prose, file text) need words: with a vector and no `text` the answer is semantic hits only; with both, the three eyes fuse exactly as for a string. The vector must have the profile's dims (`OKCODE_DIMS_MISMATCH`, never searched); when the host passes the `identity` it computed the vector in, it must equal the profile's (`OKCODE_IDENTITY_MISMATCH`). A host decides compatibility up front by comparing its identity with `embedders()[i].identity` and passes a vector only on a match. A query with neither text nor vector is `OKCODE_BAD_QUERY`.
 
-**Persistence** (okdb env `okcode`): `workspaces` (id → env, added, lastSync, access kind/root), `embedders` (name → provider/model/dims, never a function or a function-sourced secret; a profile whose function was not re-supplied on open reports `needs-config`), `settings` (`active`).
+**Listing without reading.** A host lists by metadata and never opens bodies to list. `ws.files({ dir, lang, limit })` → `{ total, truncated, asOf, files: [{ file, size, lines, lang, symbols, indexed, hash }] }` and `ws.symbols(file, { kind, limit })` → `{ file, size, lines, lang, hash, total, symbols: [{ name, path, kind, parent, lineStart, lineEnd, span, signature, exported, doc }] }` answer from the stored rows with **no facade call at all** — as fresh as the last scan (`asOf`; on a warm store, the open-time walk). `stat: true` adds one metadata `stat` and flags rows that `moved` or are `gone` since, still reading nothing. `hash` is a locator, not an `at`: read/outline verify. `symbols()` is the cheap sibling of `outline()`, the **rich** outline: outline carves an extension's structural regions (okjs template/style) or chunks (files without symbols) from the text, so it reads those files; for a plain file with symbols it now answers from the rows with a stat-first check (reads only if the file moved), as do `structure()` and the result-set checks of find/refs/mentions. So `code_outline` and `code_map` read nothing on a warm store for files that did not move; their output is unchanged.
+
+Notes: `reset('fts')` needs the workspace **open** in this process (the content index reads through its access facade); `'vectors'` works from any process. `sync()` returns `[{ id, scanned, changed, removed, ms }]`. `compare()` returns raw per-profile vector hits (not the merged `ask` results, which would hide the differences). Error codes: `OKCODE_UNKNOWN_WORKSPACE`, `OKCODE_WORKSPACE_NOT_OPEN`, `OKCODE_UNKNOWN_EMBEDDER`, `OKCODE_EMBEDDER_EXISTS`, `OKCODE_NEEDS_CONFIG`, `OKCODE_NEEDS_ID`, `OKCODE_UNKNOWN_EMBEDDER_TYPE`, `OKCODE_NO_EMBEDDINGS`, `OKCODE_DIMS_MISMATCH`, `OKCODE_IDENTITY_MISMATCH`, `OKCODE_BAD_QUERY`.
+
+**Persistence** (okdb env `okcode`): `workspaces` (id → env, added, lastSync, access kind/root), `embedders` (name → provider/fields (url, model)/dims, a custom profile's `id`, never a function or a function-sourced secret; a profile whose function was not re-supplied on open reports `needs-config`), `settings` (`active`).
 
 **Roles.** okdb runs embedding (and processor) work only in a process with those roles. Management calls act on durable state (records, cursors, rebuild requests) so they work from any process; the process holding the roles does the work. okcode never assumes the caller embeds.
 

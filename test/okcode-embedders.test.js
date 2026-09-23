@@ -13,6 +13,9 @@ const OKDB = require('@kedem/okdb');
 const okcode = require('../src/okcode');
 const { localFs } = okcode.access;
 const { writeFixture, tmpRoot } = require('./fixtures/code-fixture');
+const { pipelineName } = require('../src/identity');
+// A pipeline's name for an identity (src/identity.js).
+const pn = (type, model, dims, endpoint = '') => pipelineName({ type, endpoint, model }, dims);
 
 // A bag of words with a tiny synonym table (as in store-embeddings): enough
 // "meaning" for a vector to find what no lexical eye can.
@@ -123,6 +126,7 @@ describe('embedder profiles', () => {
         },
         custom: {
             model: 'my-local',
+            id: 'bow-local@1',
             dims: 40,
             // Written batch-shaped: texts in, vectors out (plain arrays).
             embed: async (texts) => {
@@ -145,9 +149,10 @@ describe('embedder profiles', () => {
             const st = await oc.status('app');
             const byName = Object.fromEntries(st.workspaces[0].embedders.map((e) => [e.name, e]));
             assert.deepEqual(Object.keys(byName).sort(), ['custom', 'secret', 'small']);
-            assert.equal(byName.small.pipeline, 'code_bow_32');
-            assert.equal(byName.secret.pipeline, 'code_keyed_model_24');
-            assert.equal(byName.custom.pipeline, 'code_my_local_40');
+            assert.equal(byName.small.pipeline, pn('bow', 'bow', 32));
+            // The PROVIDER names the space, not okcode's derived factory type.
+            assert.equal(byName.secret.pipeline, pn('keyed', 'keyed-model', 24));
+            assert.equal(byName.custom.pipeline, pn('custom', 'my-local', 40, 'bow-local@1'));
             for (const e of Object.values(byName)) {
                 assert.equal(e.state, 'ready', JSON.stringify(e));
                 assert.ok(e.done >= 5, JSON.stringify(e));
@@ -211,7 +216,7 @@ describe('embedder profiles', () => {
             assert.equal(byName.custom.state, 'needs-config');
             assert.match(byName.custom.error, /embed/);
             // Its pipeline and vectors are still there, reported as such.
-            assert.equal(byName.secret.pipeline, 'code_keyed_model_24');
+            assert.equal(byName.secret.pipeline, pn('keyed', 'keyed-model', 24));
             assert.ok(byName.secret.done >= 5);
             assert.equal(byName.small.state, 'ready');
 
@@ -224,7 +229,7 @@ describe('embedder profiles', () => {
             const r = await oc.addEmbedder('secret', PROFILES().secret);
             assert.deepEqual(
                 r.workspaces.map((w) => [w.id, w.pipeline, w.error]),
-                [['app', 'code_keyed_model_24', null]],
+                [['app', pn('keyed', 'keyed-model', 24), null]],
             );
             assert.equal(oc.embedders().find((e) => e.name === 'secret').state, 'configured');
             assert.equal((await ws.ask('patience', { profile: 'secret', limit: 1 }))[0].file, 'lib/retry.js');
@@ -242,7 +247,7 @@ describe('embedder profiles', () => {
             const r = await oc.addEmbedder('wide', { type: 'bow', model: 'bow', dims: 48 });
             assert.deepEqual(
                 r.workspaces.map((w) => [w.id, w.pipeline]),
-                [['app', 'code_bow_48']],
+                [['app', pn('bow', 'bow', 48)]],
             );
             await ws.store.settle();
             let byName = Object.fromEntries((await oc.status('app')).workspaces[0].embedders.map((e) => [e.name, e]));
@@ -253,14 +258,14 @@ describe('embedder profiles', () => {
             const env = ws.store.env;
             const typeEnv = await db.openEnv(`~${env.name}:emb:files`);
             const vecs = (k) => (typeEnv.hasType(`vec:${k}`) ? typeEnv.getCount(`vec:${k}`) : 0);
-            assert.ok(vecs('code_bow_48') > 0);
+            assert.ok(vecs(pn('bow', 'bow', 48)) > 0);
 
             oc.useEmbedder('wide');
             const rm = await oc.removeEmbedder('wide');
-            assert.deepEqual(rm.removed, [{ id: 'app', pipeline: 'code_bow_48' }]);
-            assert.ok(!(await env.pipelines.getRecord('code_bow_48')));
-            assert.equal(vecs('code_bow_48'), 0, 'its vectors are gone');
-            assert.ok(vecs('code_bow_32') > 0, 'the other profile is untouched');
+            assert.deepEqual(rm.removed, [{ id: 'app', pipeline: pn('bow', 'bow', 48) }]);
+            assert.ok(!(await env.pipelines.getRecord(pn('bow', 'bow', 48))));
+            assert.equal(vecs(pn('bow', 'bow', 48)), 0, 'its vectors are gone');
+            assert.ok(vecs(pn('bow', 'bow', 32)) > 0, 'the other profile is untouched');
             assert.equal(oc.active, 'small', 'the active profile moved off the removed one');
             assert.ok(!db.env('okcode').get('embedders', 'wide'));
             byName = Object.fromEntries((await oc.status('app')).workspaces[0].embedders.map((e) => [e.name, e]));

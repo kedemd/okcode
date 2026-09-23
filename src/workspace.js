@@ -30,7 +30,7 @@ const { validateSourceAsync, compareDiagnostics } = require('./analysis/validate
 const { paletteFrom } = require('./analysis/convention-color');
 const textUtil = require('./analysis/text');
 const { chunkCode } = require('./analysis/chunk');
-const { quoteLines } = require('./store');
+const { quoteLines, asQuery } = require('./store');
 
 const DEFAULTS = {
     // A whole-file read is capped by LINES, not bytes: a truncated read must
@@ -509,11 +509,59 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
     // never the tree — and report whether any of them moved. A caller that gets
     // `changed: true` back re-runs its own query once against the now-corrected
     // map; it never loops further than that, and it never triggers a tree walk.
+    //
+    // STAT-FIRST, and nothing more for a file that did not move: these verbs
+    // quote rows (names, line ranges, hashes), not text, so a file whose
+    // (size, mtime) still matches its row needs no read — the same trust
+    // verify() extends to a cached file, without demanding the text be
+    // cached first (on a warm store right after an open it never is). Only
+    // what moved or vanished goes through verify(), which reads and
+    // re-ingests it.
     async function resultSetCheck(paths) {
         const want = [...new Set(paths)].filter(Boolean);
         if (!want.length) return { changed: false };
-        const r = await verify(want);
+        const moved = await movedOf(want);
+        if (!moved) return { changed: false, unverified: true };
+        if (!moved.length) return { changed: false };
+        const r = await verify(moved);
         return { changed: r.changed.length > 0 || r.gone.length > 0 };
+    }
+
+    // The paths among `want` whose (size, mtime) no longer match their row
+    // (or that vanished) — one metadata stat, no hashing, no read. null when
+    // the facade could not be reached.
+    async function movedOf(want) {
+        let lite;
+        try {
+            lite = await access.stat(want);
+        } catch {
+            return null;
+        }
+        return want.filter((p) => {
+            const now = lite.get(p);
+            const prior = files.get(p);
+            return !now || now.missing || !prior || prior.size !== now.size || prior.mtime !== now.mtime;
+        });
+    }
+
+    // Mark listing rows ({ file }) that moved or vanished since their row was
+    // written — one metadata stat, nothing read or re-ingested.
+    async function flagMoved(rows) {
+        if (!rows.length) return rows;
+        let lite;
+        try {
+            lite = await access.stat(rows.map((r) => r.file));
+        } catch {
+            for (const r of rows) r.unverified = true;
+            return rows;
+        }
+        for (const r of rows) {
+            const now = lite.get(r.file);
+            const prior = files.get(r.file);
+            if (!now || now.missing) r.gone = true;
+            else if (!prior || prior.size !== now.size || prior.mtime !== now.mtime) r.moved = true;
+        }
+        return rows;
     }
 
     // The OPEN/sync primitive: ONE tree-wide list (path+size+mtime, no
@@ -1492,19 +1540,30 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
         // embed the question first, and the two lexical eyes must not wait
         // on a model for callers who only wanted a name. Unavailable (throws
         // OKCODE_NO_EMBEDDINGS) when no profile is configured.
+        //
+        // `query` is a string, or { text?, vector, identity? } when the host
+        // has already embedded it (one embed shared across several indexes):
+        // the vector is searched as-is — NO embed call is made for it — and
+        // must match the profile's dims (OKCODE_DIMS_MISMATCH) and, when
+        // given, its identity (OKCODE_IDENTITY_MISMATCH). The lexical eyes
+        // need words: with a vector and no text the answer is semantic only;
+        // with both, the three eyes fuse exactly as for a string.
         async ask(query, { limit = 12, profile = null } = {}) {
             if (!store || !store.hasProfiles()) {
                 const err = new Error(`workspace "${id}" has no embedding profile — ask() is unavailable`);
                 err.code = 'OKCODE_NO_EMBEDDINGS';
                 throw err;
             }
-            const lexical = await api.find(query, { limit });
-            const seen = new Set(lexical.map((h) => `${h.file}:${h.path || h.name}`));
+            const q = asQuery(query);
             // Ask for a FULL set, not half of one: the query is embedded once
             // either way, and a smaller ask only discards answers — a phrase
             // missed by both lexical eyes was found by the vector eye at rank
-            // 6, then dropped because only four were requested.
-            const semantic = await store.ask(query, { profile, limit: Math.max(8, limit) });
+            // 6, then dropped because only four were requested. Semantic
+            // first, so a mismatched vector refuses before any lexical work.
+            const semantic = await store.ask(q.vector ? q : q.text, { profile, limit: Math.max(8, limit) });
+            if (!q.text) await ensureOpen();
+            const lexical = q.text ? await api.find(q.text, { limit }) : [];
+            const seen = new Set(lexical.map((h) => `${h.file}:${h.path || h.name}`));
             // A vector hit's chunk was located at EMBEDDING time. It is a
             // reliable locator and an unreliable quote: the file may have
             // moved under it since. So the files that matched are verified
@@ -1558,6 +1617,108 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
             return out.sort((a, b) => b.score - a.score || (b.relevance || 0) - (a.relevance || 0)).slice(0, limit);
         },
 
+        // ── cheap listings (rows only) ──────────────────────────────────
+        // What the index already knows about files and symbols, served from
+        // the rows — NO file content is read, ever, and by default no facade
+        // call is made at all. This is the listing a host builds menus from
+        // (it lists by metadata and never opens bodies to list); it is as
+        // fresh as the last scan (`asOf`), which on a warm store is the
+        // open-time walk. `stat: true` adds ONE metadata stat for the listed
+        // files and flags each that moved (`moved: true`) or vanished
+        // (`gone: true`) since — still no read, no hash, no re-ingest; a
+        // moved file is re-indexed by the next sync or verifying verb.
+        //
+        // `hash` is the row's hash as of that scan: a locator, not an `at`.
+        // read()/outline() verify and hand out the `at` an edit needs.
+
+        // [{ file, size, lines, lang, symbols, indexed, hash }] under `dir`.
+        async files({ dir = null, lang = null, limit = 0, stat = false } = {}) {
+            await ensureOpen();
+            // A directory, not a string prefix: `lib` lists lib/, not libs/.
+            const d = String(dir || '')
+                .replace(/\\/g, '/')
+                .replace(/^\.(\/|$)/, '')
+                .replace(/^\/+|\/+$/g, '');
+            const prefix = d ? `${d}/` : null;
+            let all = list()
+                .filter((f) => !prefix || f.rel.startsWith(prefix))
+                .filter((f) => !lang || f.lang === lang)
+                .sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
+            const total = all.length;
+            if (limit > 0) all = all.slice(0, limit);
+            const rows = all.map((f) => ({
+                file: f.rel,
+                size: f.size == null ? null : f.size,
+                lines: f.lines == null ? null : f.lines,
+                lang: f.lang || null,
+                symbols: (f.symbols || []).length,
+                indexed: f.indexed !== false,
+                hash: f.hash || null,
+            }));
+            if (stat) await flagMoved(rows);
+            return { id, dir: prefix, total, truncated: rows.length < total, asOf: lastScanAt || null, files: rows };
+        },
+
+        // One file's SYMBOL TABLE from the stored rows: name, path, kind,
+        // parent, lines, signature, exported, doc. The cheap sibling of
+        // outline(): no text is read, so no regions (an extension's
+        // template/style pieces) and no chunk fallback for a file without
+        // symbols — outline() carves those from the text.
+        async symbols(filePath, { limit = 0, kind = null, stat = false } = {}) {
+            await ensureOpen();
+            const f = fileOf(filePath);
+            if (!f) {
+                // Not explainTarget(): its miss path greps the workspace text.
+                const base = String(filePath || '')
+                    .replace(/\\/g, '/')
+                    .split('/')
+                    .pop();
+                const near = list()
+                    .filter((x) => base && x.rel.split('/').pop() === base)
+                    .map((x) => x.rel)
+                    .slice(0, 4);
+                return {
+                    ok: false,
+                    reason: `no indexed file matching "${filePath}"${near.length ? ` — did you mean ${near.join(', ')}?` : ''}`,
+                    ...(near.length ? { candidates: near } : {}),
+                };
+            }
+            let syms = (f.symbols || []).filter((s) => !kind || s.kind === kind);
+            const total = syms.length;
+            if (limit > 0) syms = syms.slice(0, limit);
+            const out = {
+                ok: true,
+                file: f.rel,
+                size: f.size == null ? null : f.size,
+                lines: f.lines == null ? null : f.lines,
+                lang: f.lang || null,
+                indexed: f.indexed !== false,
+                hash: f.hash || null,
+                asOf: lastScanAt || null,
+                total,
+                truncated: syms.length < total,
+                symbols: syms.map((s) => ({
+                    name: s.name,
+                    path: s.path || s.name,
+                    kind: s.kind,
+                    parent: s.parent || null,
+                    lineStart: s.lineStart,
+                    lineEnd: s.lineEnd,
+                    span: s.lineEnd - s.lineStart + 1,
+                    signature: s.signature || null,
+                    exported: !!s.exported,
+                    doc: s.doc ? String(s.doc).slice(0, 200) : null,
+                })),
+            };
+            if (stat) {
+                const [row] = await flagMoved([{ file: f.rel, size: f.size }]);
+                if (row.moved) out.moved = true;
+                if (row.gone) out.gone = true;
+                if (row.unverified) out.unverified = true;
+            }
+            return out;
+        },
+
         // ── outline ─────────────────────────────────────────────────────
         // THE SYMBOL TABLE OF ONE FILE — what it contains, without its
         // contents. This is how a resource gets inspected in PIECES rather
@@ -1572,9 +1733,20 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
             if (f.indexed === false) {
                 return { ok: false, reason: `${f.rel} is not indexed as text (${f.reason || 'binary or withheld'})` };
             }
-            await verify([f.path]);
-            const fresh = files.get(f.path);
+            // A plain file with symbols is answered from its rows, which need
+            // no text: stat-first (as for find's results), reading only if
+            // it moved. Regions and chunks are carved from the text, so
+            // those files verify (and read) as before.
+            if (!extensionFor(f.path) && (f.symbols || []).length) await resultSetCheck([f.path]);
+            else await verify([f.path]);
+            let fresh = files.get(f.path);
             if (!fresh) return { ok: false, reason: `${f.rel} no longer exists` };
+            // Moved and lost every symbol: the rich paths below need text.
+            if (!(fresh.symbols || []).length && typeof fresh.content !== 'string') {
+                await verify([f.path]);
+                fresh = files.get(f.path);
+                if (!fresh) return { ok: false, reason: `${f.rel} no longer exists` };
+            }
             const syms = fresh.symbols || [];
             const max = opts.outlineMaxLines;
             const piecesOut = (by, flat, mapKind) => ({

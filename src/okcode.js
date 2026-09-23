@@ -27,7 +27,7 @@ const OKDB = require('@kedem/okdb');
 const { openWorkspace } = require('./workspace');
 const { openStore, envNameFor, FILES, SYMBOLS } = require('./store');
 const emb = require('./embedders');
-const chunk = require('./analysis/chunk');
+const identity = require('./identity');
 
 const META_ENV = 'okcode';
 const T_WS = 'workspaces';
@@ -334,31 +334,40 @@ async function open({
         return out;
     }
 
-    // One profile's pipeline in one workspace, without a store: named from
-    // the model and (learned) dims, else found among the env's records.
-    async function pipelineFor(env, p) {
-        const model = emb.modelOf(
-            p.profile ? p.profile.embedder : p.record.fields ? { ...p.record.fields, type: p.record.type } : p.record,
-        );
-        const m = model || p.record.model || p.record.type;
-        if (!m) return null;
-        let recs = [];
+    // The names of every pipeline in a workspace env.
+    async function pipelineNames(env) {
         try {
-            recs = (await env.pipelines.listRecords()) || [];
+            return ((await env.pipelines.listRecords()) || []).map(({ key, value }) =>
+                String((value && value.name) || key || ''),
+            );
         } catch {
-            recs = [];
+            return [];
         }
-        const names = recs.map(({ key, value }) => String((value && value.name) || key || ''));
-        if (p.record.dims) {
-            const want = chunk.pipelineName(m, p.record.dims);
-            return names.includes(want) ? { pipeline: want, dims: p.record.dims } : null;
+    }
+
+    // One profile's pipeline in one workspace, without a store: named from
+    // its identity (type, endpoint, model) and (learned) dims, else found
+    // among the env's records by re-checking each candidate's identity hash.
+    async function pipelineFor(env, p, names = null) {
+        const parts = (p.profile && p.profile.identity) || emb.partsOfRecord(p.record);
+        if (!parts || !parts.type) return null;
+        return identity.findPipeline(names || (await pipelineNames(env)), parts, p.record.dims || null);
+    }
+
+    // okcode's pipelines in a workspace env that no known profile addresses —
+    // left behind when a profile's identity changed (a new url, model or
+    // dims) or by an older naming scheme. They still hold vectors, and their
+    // indexers still embed every change against the OLD embedder, so they are
+    // reported (status) and dropped on request (removeOrphaned), never
+    // served.
+    async function orphansOf(env) {
+        const names = await pipelineNames(env);
+        const claimed = new Set();
+        for (const p of profiles.values()) {
+            const f = await pipelineFor(env, p, names);
+            if (f) claimed.add(f.pipeline);
         }
-        const re = new RegExp(`^code_${chunk.slug(m)}_(\\d+)$`);
-        for (const n of names) {
-            const hit = re.exec(n);
-            if (hit) return { pipeline: n, dims: Number(hit[1]) };
-        }
-        return null;
+        return names.filter((n) => identity.isOurs(n) && !claimed.has(n));
     }
 
     async function indexerStats(scoped) {
@@ -381,13 +390,17 @@ async function open({
         }
     }
 
-    function embedderEntry(p, { pipeline = null, dims = null, model = null, stats = null, error = null } = {}) {
+    function embedderEntry(p, { pipeline = null, dims = null, stats = null, error = null } = {}) {
         const counts = (stats && stats.doc_counts) || {};
+        const space = emb.describe(p.record, dims || null);
         const e = {
             name: p.name,
             pipeline,
-            model: model || p.record.model || (p.profile && emb.modelOf(p.profile.embedder)) || null,
-            dims: dims || p.record.dims || null,
+            type: space.type,
+            endpoint: space.endpoint,
+            model: space.model,
+            dims: space.dims,
+            identity: space.identity,
             active: p.name === activeName,
             done: counts.done || 0,
             pending: counts.pending || 0,
@@ -421,6 +434,7 @@ async function open({
             symbols: 0,
             fts: {},
             embedders: [],
+            orphaned: [],
         };
         if (!env) {
             out.missing = true;
@@ -445,7 +459,6 @@ async function open({
                     embedderEntry(p, {
                         pipeline: sp.pipeline,
                         dims: sp.dims,
-                        model: sp.model,
                         stats: sp.status,
                         error: sp.error,
                     }),
@@ -453,7 +466,7 @@ async function open({
                 continue;
             }
             if (sp && sp.error) {
-                out.embedders.push(embedderEntry(p, { model: sp.model, error: sp.error }));
+                out.embedders.push(embedderEntry(p, { error: sp.error }));
                 continue;
             }
             const found = await pipelineFor(env, p);
@@ -464,7 +477,28 @@ async function open({
             const stats = await indexerStats(`${env.name}:${found.pipeline}`);
             out.embedders.push(embedderEntry(p, { pipeline: found.pipeline, dims: found.dims, stats }));
         }
+        for (const pipeline of await orphansOf(env)) {
+            const stats = await indexerStats(`${env.name}:${pipeline}`);
+            const counts = (stats && stats.doc_counts) || {};
+            out.orphaned.push({
+                pipeline,
+                done: counts.done || 0,
+                vectors: stats && typeof stats.vector_count === 'number' ? stats.vector_count : null,
+            });
+        }
         return out;
+    }
+
+    // What the host sees about a profile: its vector space and whether this
+    // process can use it. No functions, no secrets.
+    function profileEntry(p) {
+        return {
+            name: p.name,
+            ...emb.describe(p.record),
+            active: p.name === activeName,
+            state: p.needsConfig ? 'needs-config' : 'configured',
+            ...(p.needsConfig ? { error: p.reason } : {}),
+        };
     }
 
     async function status(id = null) {
@@ -474,15 +508,7 @@ async function open({
         return {
             workspaces: list,
             active: activeName,
-            embedders: [...profiles.values()].map((p) => ({
-                name: p.name,
-                type: p.record.provider || p.record.type || null,
-                model: p.record.model || null,
-                dims: p.record.dims || null,
-                active: p.name === activeName,
-                state: p.needsConfig ? 'needs-config' : 'configured',
-                ...(p.needsConfig ? { error: p.reason } : {}),
-            })),
+            embedders: [...profiles.values()].map(profileEntry),
             role: db.role ? { processors: db.role.processors !== false, engines: db.role.engines !== false } : null,
         };
     }
@@ -596,7 +622,7 @@ async function open({
             if (!env) continue;
             const found = await pipelineFor(env, p);
             if (!found) continue;
-            // Another profile on the same model and dims shares the pipeline.
+            // Another profile with the same identity shares the pipeline.
             let shared = false;
             for (const q of profiles.values()) {
                 if (q === p) continue;
@@ -622,6 +648,25 @@ async function open({
         await env.pipelines.remove(pipeline);
     }
 
+    // Drop the orphaned pipelines (status().workspaces[].orphaned) of one
+    // workspace, or of every known one. Works from any process.
+    async function removeOrphaned(id = null) {
+        const ids = id == null ? workspaces().map((w) => w.id) : (assertKnown(id), [id]);
+        const removed = [];
+        for (const wid of ids) {
+            const env = await envOf(wid);
+            if (!env) continue;
+            for (const pipeline of await orphansOf(env)) {
+                await dropPipeline(env, pipeline);
+                removed.push({ id: wid, pipeline });
+            }
+        }
+        return { removed };
+    }
+
+    // `query` as for ask(): a string, or { vector, text?, identity? } — one
+    // vector can only be compared across profiles of the same dims (each
+    // profile refuses a mismatch).
     async function compare(id, query, names = null, { limit = 8, text = false } = {}) {
         const o = requireOpen(id, 'compare');
         const list = names == null ? usable().map((p) => p.name) : Array.isArray(names) ? names : [names];
@@ -653,22 +698,20 @@ async function open({
         addEmbedder,
         useEmbedder,
         removeEmbedder,
+        removeOrphaned,
         compare,
         close,
         // The active profile's name (what ask() uses without { profile }).
         get active() {
             return activeName;
         },
-        // [{ name, type, model, dims, active, state }] — no functions, no secrets.
+        // [{ name, type, endpoint, model, dims, identity, active, state }] —
+        // no functions, no secrets. `identity` (src/identity.js) is the
+        // vector space: JSON [type, endpoint, model, dims], null until the
+        // dims are known. A host holding a query vector passes it to ask()
+        // only for a profile whose identity equals its own.
         embedders() {
-            return [...profiles.values()].map((p) => ({
-                name: p.name,
-                type: p.record.provider || p.record.type || null,
-                model: p.record.model || null,
-                dims: p.record.dims || null,
-                active: p.name === activeName,
-                state: p.needsConfig ? 'needs-config' : 'configured',
-            }));
+            return [...profiles.values()].map(profileEntry);
         },
     };
 }

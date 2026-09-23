@@ -14,6 +14,9 @@ const { openWorkspace } = require('../src/workspace');
 const { openStore, envNameFor } = require('../src/store');
 const { localFs } = require('../src/access');
 const { writeFixture, tmpRoot } = require('./fixtures/code-fixture');
+const { pipelineName } = require('../src/identity');
+// A pipeline's name for an identity (src/identity.js).
+const pn = (type, model, dims, endpoint = '') => pipelineName({ type, endpoint, model }, dims);
 
 const CONCEPTS = {
     backoff: 'RETRY',
@@ -126,8 +129,8 @@ describe('embedding profiles', () => {
         assert.deepEqual(
             profiles.map((p) => [p.name, p.pipeline, p.dims, p.error]),
             [
-                ['small', 'code_bow_64', 64, null],
-                ['wide', 'code_bow_96', 96, null],
+                ['small', pn('bow', 'bow', 64), 64, null],
+                ['wide', pn('bow', 'bow', 96), 96, null],
             ],
         );
         for (const p of profiles) {
@@ -166,6 +169,65 @@ describe('embedding profiles', () => {
         await ws.close();
     });
 
+    it('a precomputed query vector is searched as-is: no embed call, dims and identity checked', async () => {
+        const st = await openStore({ db, id: 'vec', access: localFs(root), profiles: PROFILES });
+        const ws = await openWorkspace({ id: 'vec', access: localFs(root), store: st });
+        await ws.sync();
+        await st.settle();
+        const [small] = await st.profiles();
+        assert.equal(small.identity, JSON.stringify(['bow', '', 'bow', 64]));
+
+        // The string path embeds the query (once).
+        let before = embedCalls.n;
+        const byText = await st.ask('patience', { profile: 'small', limit: 3 });
+        assert.equal(embedCalls.n - before, 1, 'a string query is embedded');
+
+        // The same question, embedded by the host: the same answer, and the
+        // embedder is never called — at the store, in ws.ask with and
+        // without text, and with the host's identity attached.
+        const vector = bow('patience', 64);
+        before = embedCalls.n;
+        const byVector = await st.ask({ vector }, { profile: 'small', limit: 3 });
+        assert.deepEqual(
+            byVector.map((h) => [h.file, h.chunkHash]),
+            byText.map((h) => [h.file, h.chunkHash]),
+        );
+        const plain = await st.ask({ vector: Array.from(vector) }, { profile: 'small', limit: 3 });
+        assert.equal(plain[0].file, byText[0].file, 'a plain array is accepted too');
+
+        const semanticOnly = await ws.ask({ vector }, { profile: 'small', limit: 5 });
+        assert.ok(semanticOnly.length > 0);
+        assert.ok(
+            semanticOnly.every((h) => h.via === 'vector'),
+            'no text → no lexical eyes',
+        );
+        assert.equal(semanticOnly[0].name, 'backoff');
+
+        // With text too, the lexical eyes run and fuse: `backoff` is an exact
+        // name, so the name match leads.
+        const fused = await ws.ask({ text: 'backoff', vector: bow('backoff', 64) }, { profile: 'small', limit: 5 });
+        assert.equal(fused[0].name, 'backoff');
+        assert.notEqual(fused[0].via, 'vector');
+
+        const withId = await ws.ask({ vector, identity: small.identity }, { profile: 'small', limit: 1 });
+        assert.equal(withId[0].name, 'backoff');
+        assert.equal(embedCalls.n, before, 'no embed call for any vector query');
+
+        // A vector from another space is refused, not searched.
+        await assert.rejects(ws.ask({ vector: bow('patience', 96) }, { profile: 'small' }), {
+            code: 'OKCODE_DIMS_MISMATCH',
+        });
+        await assert.rejects(st.ask({ vector }, { profile: 'wide' }), { code: 'OKCODE_DIMS_MISMATCH' });
+        await assert.rejects(
+            ws.ask({ vector, identity: JSON.stringify(['ollama', '', 'bow', 64]) }, { profile: 'small' }),
+            { code: 'OKCODE_IDENTITY_MISMATCH' },
+        );
+        await assert.rejects(ws.ask({}, { profile: 'small' }), { code: 'OKCODE_BAD_QUERY' });
+        await assert.rejects(ws.ask({ vector: 'nope' }, { profile: 'small' }), { code: 'OKCODE_BAD_QUERY' });
+        assert.equal(embedCalls.n, before);
+        await ws.close();
+    });
+
     it('an edit re-embeds; reopening the store reuses the pipelines', async () => {
         const st = await openStore({ db, id: 'emb', access: localFs(root), profiles: PROFILES });
         const ws = await openWorkspace({ id: 'emb', access: localFs(root), store: st });
@@ -199,7 +261,7 @@ describe('embedding profiles', () => {
         const [p] = await st.profiles();
         assert.equal(p.error, null);
         assert.equal(p.dims, 8);
-        assert.equal(p.pipeline, 'code_bow_auto_8');
+        assert.equal(p.pipeline, pn('bow', 'bow-auto', 8));
         const ws = await openWorkspace({ id: 'probe', access: localFs(root), store: st });
         await ws.sync();
         await st.settle();
@@ -212,7 +274,7 @@ describe('embedding profiles', () => {
             access: localFs(root),
             profiles: [{ name: 'auto', embedder: { type: 'bow', model: 'bow-auto' } }],
         });
-        assert.equal((await again.profiles())[0].pipeline, 'code_bow_auto_8');
+        assert.equal((await again.profiles())[0].pipeline, pn('bow', 'bow-auto', 8));
     });
 
     it('vectors carry no file text, and drop() removes the pipelines with the env', async () => {
@@ -243,17 +305,14 @@ describe('embedding profiles', () => {
         assert.equal(fs.existsSync(path.join(base, 'okdb', envNameFor('bytes'))), false);
     });
 
-    it(
-        'drop() leaves no directory of the workspace env behind (okdb d195f80: sub-env paths resolved under the root)',
-        async () => {
-            const st = await openStore({ db, id: 'leftover', access: localFs(root), profiles: [PROFILES[0]] });
-            const ws = await openWorkspace({ id: 'leftover', access: localFs(root), store: st });
-            await ws.sync();
-            await st.settle();
-            await ws.close();
-            await st.drop();
-            const left = fs.readdirSync(path.join(base, 'okdb')).filter((d) => d.includes(envNameFor('leftover')));
-            assert.deepEqual(left, []);
-        },
-    );
+    it('drop() leaves no directory of the workspace env behind (okdb d195f80: sub-env paths resolved under the root)', async () => {
+        const st = await openStore({ db, id: 'leftover', access: localFs(root), profiles: [PROFILES[0]] });
+        const ws = await openWorkspace({ id: 'leftover', access: localFs(root), store: st });
+        await ws.sync();
+        await st.settle();
+        await ws.close();
+        await st.drop();
+        const left = fs.readdirSync(path.join(base, 'okdb')).filter((d) => d.includes(envNameFor('leftover')));
+        assert.deepEqual(left, []);
+    });
 });

@@ -4,7 +4,7 @@
 // A profile is what the host configures under a name:
 //
 //   { type: 'ollama' | 'openai' | <any okdb factory type>, model, url?, apiKey?, dims?, ...providerFields }
-//   { embed: async (text | texts) => vector(s), embedBatch?, dims?, model? }        // custom
+//   { embed: async (text | texts) => vector(s), id, embedBatch?, dims?, model? }    // custom
 //
 // and what okdb needs is an embedder CONFIG — a plain, persistable object whose
 // `type` names a factory registered on the okdb instance. Two things in a
@@ -19,8 +19,21 @@
 // A plain string apiKey is passed through as okdb's `api_key`: okdb stores it
 // with the embedder record (masked in its admin UI). okcode's own profile
 // record never holds it.
+//
+// IDENTITY (src/identity.js). Every profile carries the dims-free parts of its
+// vector space — { type, endpoint, model } — and the store adds the dims. For
+// a built-in provider they come from the config: the PROVIDER (not a derived
+// factory type, which only says "okcode holds a function for this"), its
+// url/base_url, its model. A custom `embed` function says nothing okcode can
+// inspect about the space it embeds into, so the host must name it: `id` is
+// REQUIRED on a custom profile (e.g. 'my-embed-service@v2') and stands in the
+// endpoint slot — change it whenever the function starts producing different
+// vectors, and okcode builds a new store instead of mixing the two. The
+// profile NAME is deliberately not part of it: a name is the host's handle for
+// switching between profiles, not a statement about what the vectors mean.
 
 const chunk = require('./analysis/chunk');
+const identity = require('./identity');
 
 const DERIVED_PREFIX = 'okcode-';
 
@@ -118,14 +131,19 @@ function fromHost(db, name, cfg) {
     const dims = Number.isInteger(cfg.dims) && cfg.dims > 0 ? cfg.dims : null;
 
     if (typeof cfg.embed === 'function') {
+        if (typeof cfg.id !== 'string' || !cfg.id) {
+            const err = new Error(
+                `embedder "${name}": a custom embed profile needs an \`id\` naming its vector space (e.g. 'my-service@v2') — change it whenever the function's vectors change`,
+            );
+            err.code = 'OKCODE_NEEDS_ID';
+            throw err;
+        }
         const type = derivedType(name);
         db.embeddings.registerEmbedderFactory(type, customFactory(cfg), { label: `okcode custom (${name})` });
-        const model = typeof cfg.model === 'string' && cfg.model ? cfg.model : type;
-        const embedder = { type, model, ...(dims ? { dims } : {}) };
-        return {
-            profile: { name, embedder, dims },
-            record: { name, kind: 'custom', type, model, dims, needs: 'embed' },
-        };
+        const model = typeof cfg.model === 'string' && cfg.model ? cfg.model : null;
+        const embedder = { type, model: model || type, ...(dims ? { dims } : {}) };
+        const record = { name, kind: 'custom', type, provider: 'custom', id: cfg.id, model, dims, needs: 'embed' };
+        return { profile: { name, embedder, dims, identity: partsOfRecord(record) }, record };
     }
 
     if (typeof cfg.type !== 'string' || !cfg.type) {
@@ -159,38 +177,67 @@ function fromHost(db, name, cfg) {
             label: `okcode ${cfg.type} (${name})`,
         });
         const embedder = { ...safeFields, type, ...(dims ? { dims } : {}) };
-        return {
-            profile: { name, embedder, dims, ...(pipeline ? { pipeline } : {}) },
-            record: {
-                name,
-                kind: 'builtin',
-                type,
-                provider: cfg.type,
-                model: safeFields.model || null,
-                fields: safeFields,
-                dims,
-                apiKey: 'function',
-                needs: 'apiKey',
-                ...(pipeline ? { pipeline } : {}),
-            },
-        };
-    }
-
-    const embedder = { ...fields, type: cfg.type, ...(dims ? { dims } : {}) };
-    return {
-        profile: { name, embedder, dims, ...(pipeline ? { pipeline } : {}) },
-        record: {
+        const record = {
             name,
             kind: 'builtin',
-            type: cfg.type,
+            type,
             provider: cfg.type,
             model: safeFields.model || null,
             fields: safeFields,
             dims,
-            apiKey: keySource, // 'string' (held by okdb's embedder record) | null
-            needs: null,
+            apiKey: 'function',
+            needs: 'apiKey',
             ...(pipeline ? { pipeline } : {}),
-        },
+        };
+        return {
+            profile: { name, embedder, dims, identity: partsOfRecord(record), ...(pipeline ? { pipeline } : {}) },
+            record,
+        };
+    }
+
+    const embedder = { ...fields, type: cfg.type, ...(dims ? { dims } : {}) };
+    const record = {
+        name,
+        kind: 'builtin',
+        type: cfg.type,
+        provider: cfg.type,
+        model: safeFields.model || null,
+        fields: safeFields,
+        dims,
+        apiKey: keySource, // 'string' (held by okdb's embedder record) | null
+        needs: null,
+        ...(pipeline ? { pipeline } : {}),
+    };
+    return {
+        profile: { name, embedder, dims, identity: partsOfRecord(record), ...(pipeline ? { pipeline } : {}) },
+        record,
+    };
+}
+
+// The dims-free identity parts of a persisted profile record.
+function partsOfRecord(rec) {
+    if (!rec) return null;
+    if (rec.kind === 'custom')
+        return { type: 'custom', endpoint: String(rec.id || ''), model: String(rec.model || '') };
+    const fields = rec.fields || {};
+    return {
+        type: String(rec.provider || rec.type || ''),
+        endpoint: identity.endpointOf(fields),
+        model: String(fields.model || rec.model || ''),
+    };
+}
+
+// What a host sees about a profile's vector space: { type, endpoint, model,
+// dims, identity } — identity null until the dims are known.
+function describe(rec, dims = null) {
+    const parts = partsOfRecord(rec) || { type: null, endpoint: '', model: '' };
+    const d = Number.isInteger(dims) && dims > 0 ? dims : Number.isInteger(rec && rec.dims) ? rec.dims : null;
+    return {
+        type: parts.type || null,
+        endpoint: parts.endpoint || null,
+        model: parts.model || null,
+        dims: d,
+        identity: identity.identityOf(parts, d),
     };
 }
 
@@ -221,6 +268,7 @@ function fromRecord(db, rec) {
             name: rec.name,
             embedder,
             dims: rec.dims || null,
+            identity: partsOfRecord(rec),
             ...(rec.pipeline ? { pipeline: rec.pipeline } : {}),
         },
         record: rec,
@@ -231,4 +279,4 @@ function fromRecord(db, rec) {
 // The model name the store derives the pipeline name from (store.js modelOf).
 const modelOf = (embedder) => (embedder && (embedder.model || embedder.type)) || null;
 
-module.exports = { fromHost, fromRecord, derivedType, modelOf, DERIVED_PREFIX };
+module.exports = { fromHost, fromRecord, partsOfRecord, describe, derivedType, modelOf, DERIVED_PREFIX };

@@ -17,7 +17,7 @@ okcode ships two implementations (`okcode.access.localFs`, `okcode.access.shell`
 
 ### `list({ skip }) → [{ path, size, mtime }]`
 
-Every regular file under the root. `skip` is a list of directory names to prune at any depth (default: `node_modules .git .idea dist build coverage .next vendor`); it matches directories only (a *file* named `dist` is listed). Dot-directories below the root are pruned. Symlinks are neither followed nor listed. Unreadable entries are skipped, never fatal — one locked file must cost that file, not the listing. No hashing.
+Every regular file under the root. `skip` is a list of directory names to prune at any depth (default: `node_modules .git .idea dist build coverage .next vendor`); it matches directories only (a _file_ named `dist` is listed). Dot-directories below the root are pruned. Symlinks are neither followed nor listed. Unreadable entries are skipped, never fatal — one locked file must cost that file, not the listing. No hashing.
 
 ### `stat(paths, { hash = false }) → Map<path, { size, mtime, hash? } | { missing: true }>`
 
@@ -31,22 +31,22 @@ Contents of named files. A missing or unreadable file is simply absent from the 
 
 The only write. Atomic for one file: readers see the old bytes or the new bytes, never a mix.
 
-| call | behaviour |
-| --- | --- |
-| `create: true` | publish only if `path` does not exist; parent directories are created |
-| `expectedHash: H` | replace only if the current content hashes to `H` (compare-and-swap) |
+| call              | behaviour                                                             |
+| ----------------- | --------------------------------------------------------------------- |
+| `create: true`    | publish only if `path` does not exist; parent directories are created |
+| `expectedHash: H` | replace only if the current content hashes to `H` (compare-and-swap)  |
 
 `outcome`:
 
-| outcome | meaning |
-| --- | --- |
-| `ok` | written; `hash` is the hash of what is now on disk |
-| `stale` | current content ≠ `expectedHash`; `current` is its hash; nothing written |
-| `exists` | `create` but the path exists; nothing written |
-| `missing` | replace but the path does not exist; nothing written |
-| `symlink` | the target is a symlink/reparse point; refused |
-| `noatomic` | the facade cannot publish atomically here (e.g. temp and target on different devices); nothing written; `error` may say why (`mkdir`, `write`, `link`, `device`, `rename`) |
-| `response-lost` | the transport failed after sending; the write may or may not have happened — okcode re-reads to find out |
+| outcome         | meaning                                                                                                                                                                    |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ok`            | written; `hash` is the hash of what is now on disk                                                                                                                         |
+| `stale`         | current content ≠ `expectedHash`; `current` is its hash; nothing written                                                                                                   |
+| `exists`        | `create` but the path exists; nothing written                                                                                                                              |
+| `missing`       | replace but the path does not exist; nothing written                                                                                                                       |
+| `symlink`       | the target is a symlink/reparse point; refused                                                                                                                             |
+| `noatomic`      | the facade cannot publish atomically here (e.g. temp and target on different devices); nothing written; `error` may say why (`mkdir`, `write`, `link`, `device`, `rename`) |
+| `response-lost` | the transport failed after sending; the write may or may not have happened — okcode re-reads to find out                                                                   |
 
 Replace preserves the target's permission bits. Implementations write a temp file in the target's directory and rename it into place. The shell facade also sends the payload's hash and verifies it on the target before publishing: bytes damaged in transit come back as `response-lost` (`error: 'payload corrupted in transit; nothing was written'`), never as a written file.
 
@@ -84,15 +84,22 @@ Example — a remote workspace over OpenSSH:
 
 ```js
 const { spawn } = require('child_process');
-const run = (script, stdin) => new Promise((resolve, reject) => {
-    // ssh joins its arguments into one remote command line, so the script must be quoted for the remote shell.
-    const p = spawn('ssh', ['-o', 'BatchMode=yes', 'dev-box', `bash --noprofile --norc -c ${okcode.access.shell.quote(script)}`]);
-    let out = '', err = '';
-    p.stdout.on('data', (d) => (out += d));
-    p.stderr.on('data', (d) => (err += d));
-    p.on('close', (code) => (code === 0 ? resolve(out) : reject(new Error(err || `exit ${code}`))));
-    p.stdin.end(stdin ?? '');
-});
+const run = (script, stdin) =>
+    new Promise((resolve, reject) => {
+        // ssh joins its arguments into one remote command line, so the script must be quoted for the remote shell.
+        const p = spawn('ssh', [
+            '-o',
+            'BatchMode=yes',
+            'dev-box',
+            `bash --noprofile --norc -c ${okcode.access.shell.quote(script)}`,
+        ]);
+        let out = '',
+            err = '';
+        p.stdout.on('data', (d) => (out += d));
+        p.stderr.on('data', (d) => (err += d));
+        p.on('close', (code) => (code === 0 ? resolve(out) : reject(new Error(err || `exit ${code}`))));
+        p.stdin.end(stdin ?? '');
+    });
 const access = okcode.access.shell({ root: '/srv/api', run });
 ```
 

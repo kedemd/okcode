@@ -36,7 +36,13 @@ A workspace is identified by a **host-chosen id** (`'app'`, the brain's workspac
 
 ## 5. Storage
 
-okcode keeps its own okdb store (`open({ path })`), or uses one the host passes (`open({ db })`). **Never two okdb instances on one path in one process** — the brain measured a native deadlock doing that; a host that already has an okdb open on the same path must pass `db`.
+okcode keeps its own okdb store (`open({ path })`), or uses one the host passes (`open({ db })`).
+
+**Placement** (settled): okcode's data is its own store, never mixed into a host's database — code indexing is heavy and bursty, and a separate store compacts, backs up, syncs and resets on its own schedule.
+
+- **Standalone (CLI):** `<root>/.okcode`, one workspace with id `default`, created and kept up to date automatically (like `.git`; added to `.gitignore`; never indexed — access facades prune dot-directories). `--store DIR --id NAME` points several workspaces at one shared store.
+- **Hosts with many workspaces** (the brain): one shared store at the host's chosen path (e.g. `/data/okcode` beside `/data/brain`), one env per workspace. Several processes may open it (okdb is multi-process on one path); the one holding the processing roles indexes and embeds. Every process that touches a workspace registers it (`addWorkspace`) so its access facade and resolvers exist there.
+- Idle cost: an inactive workspace's vector index unloads after 5 minutes (okdb local views); the rest of an open env's footprint is small. Env residency (close idle envs) was considered and deferred as over-optimization. **Never two okdb instances on one path in one process** — the brain measured a native deadlock doing that; a host that already has an okdb open on the same path must pass `db`.
 
 **One okdb environment per workspace**: `okcode_<slug>` — the id lowercased to `[a-z0-9_]` (≤ 40 chars), plus `_<sha1(id)[:8]>` whenever slugging changed it, so `App`/`app` never collide. (Not `okcode:<id>`: okdb splits scoped engine names at the first `:`, and a leading `~` is reserved for okdb's own envs.) Removing a workspace = one `removeEnvironment`. Nothing mixes with host data.
 

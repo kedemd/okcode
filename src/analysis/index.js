@@ -12,6 +12,7 @@ const templateBalance = require('./template-balance');
 const conventionColor = require('./convention-color');
 const okjs = require('./ext-okjs');
 const packages = require('./packages');
+const chunk = require('./chunk');
 
 module.exports = {
     // parse
@@ -35,6 +36,8 @@ module.exports = {
     registerExtension: extensions.registerExtension,
     extensionFor: extensions.extensionFor,
     listExtensions: extensions.listExtensions,
+    // symbol-aware chunking for embeddings (namespaced)
+    chunk,
     // template balance (namespaced: `check` alone says nothing)
     templateBalance,
     checkTemplateBalance: templateBalance.check,

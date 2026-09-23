@@ -48,7 +48,7 @@ Manager: end-to-end over ssh with real okdb, then the brain adapter (separate wo
 | A1 access | done (48 tests: localFs, shell/local bash, shell/real ssh; PowerShell + BSD fallbacks ported, unexercised — no pwsh/BSD here) |
 | A2 analysis | done — `0b25c28` (39 tests; okjs present + absent) |
 | A3 okdb batch resolvers | done — okdb `8ed63a5` (`resolveField(…, { batch, batchSize })`, embeddings prefetch) |
-| B1 workspace + store | — |
+| B1 workspace + store | done (79 tests; workspace suites on localFs + real ssh; no-content proof; found okdb d195f80) |
 | C1 okcode | — |
 | C2 surfaces | — |
 | D integration | — |

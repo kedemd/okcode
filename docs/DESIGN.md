@@ -38,7 +38,7 @@ A workspace is identified by a **host-chosen id** (`'app'`, the brain's workspac
 
 okcode keeps its own okdb store (`open({ path })`), or uses one the host passes (`open({ db })`). **Never two okdb instances on one path in one process** — the brain measured a native deadlock doing that; a host that already has an okdb open on the same path must pass `db`.
 
-**One okdb environment per workspace**: `okcode:<id>` (id slugged). Removing a workspace = one `removeEnvironment`. Nothing mixes with host data.
+**One okdb environment per workspace**: `okcode_<slug>` — the id lowercased to `[a-z0-9_]` (≤ 40 chars), plus `_<sha1(id)[:8]>` whenever slugging changed it, so `App`/`app` never collide. (Not `okcode:<id>`: okdb splits scoped engine names at the first `:`, and a leading `~` is reserved for okdb's own envs.) Removing a workspace = one `removeEnvironment`. Nothing mixes with host data.
 
 Types inside a workspace env:
 
@@ -48,7 +48,7 @@ Types inside a workspace env:
 | `symbols` | `rel::symPath::line` | `file, name, kind, lineStart, lineEnd, start, end, path, parent, signature, doc, exported` |
 | `packages` | `name` | dependency surface (name, version, description, exports/types) |
 
-- **Content is a resolved field** (`env.resolveField('files', 'content', …)`, okdb ≥ 2.3): FTS over `['rel', 'content']` and the embeddings pipeline read file text through the facade, batched; okdb never stores it. The row's `hash` is its version: a changed hash rewrites the row, and the change feed re-indexes it.
+- **Content is a resolved field** (`env.resolveField('files', …, { batch })`, okdb ≥ 2.3), batched through the facade; okdb never stores it. FTS reads `content`. Embeddings read a second resolved field, `prepared` (`//@ <rel>\n` + text): okdb's chunkers see only the field value, and the symbol-aware chunker needs the path for its language seams and chunk headers. Both resolvers answer from the workspace's text cache first (by rel + hash), so a scan's FTS drain re-reads nothing. The row's `hash` is its version: a changed hash rewrites the row, and the change feed re-indexes it.
 - **FTS**: `symbols` on `name, path, doc, signature`; `files` on `rel, content`; both with the brain's stopword list (a question phrased naturally must not demand that "where/is/the" appear in the code).
 - The in-memory working set (per open workspace) may hold file text as a **cache** for parsing and slicing; it is rebuilt from the facade, never persisted.
 

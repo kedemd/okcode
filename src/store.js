@@ -262,6 +262,18 @@ async function openStore({ db, id, access, profiles = [], log = () => {} } = {})
         }
     }
 
+    // The member engines (type@name) a pipeline record names that have no engine record.
+    async function missingMembers(pipeline) {
+        try {
+            const view = await env.pipelines.get(pipeline);
+            return ((view && view.engines) || [])
+                .filter((e) => e && e.exists === false)
+                .map((e) => `${e.type}@${e.name}`);
+        } catch {
+            return [];
+        }
+    }
+
     async function ensureProfile(profile) {
         const { name, embedder } = profile || {};
         if (!name) throw new Error('an embedding profile needs a name');
@@ -308,7 +320,18 @@ async function openStore({ db, id, access, profiles = [], log = () => {} } = {})
             const pipeline = identity.pipelineName(parts, dims);
             const scoped = `${envName}:${pipeline}`;
             Object.assign(st, { dims, pipeline, scoped, identity: identity.identityOf(parts, dims) });
-            const existing = await env.pipelines.getRecord(pipeline);
+            let existing = await env.pipelines.getRecord(pipeline);
+            // A record is not proof of a working pipeline: one whose member engines are gone (an
+            // interrupted first boot, members removed under it) never indexes. Where engines run,
+            // hand it back to createPipeline, which re-creates the missing members (okdb ≥ 2.3.1;
+            // an older okdb refuses and the profile reports that error).
+            if (existing && db.role?.engines !== false) {
+                const missing = await missingMembers(pipeline);
+                if (missing.length) {
+                    log(`[okcode] pipeline ${pipeline} is missing ${missing.join(', ')} — repairing it`);
+                    existing = null;
+                }
+            }
             if (!existing) {
                 await db.embeddings.createPipeline(pipeline, {
                     ...(profile.pipeline || {}),

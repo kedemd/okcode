@@ -29,7 +29,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
-const { DEFAULT_SKIP, sha1, checkPath, acquireLock, selfIdentity } = require('./common');
+const { DEFAULT_SKIP, sha1, pathChecker, acquireLock, selfIdentity } = require('./common');
 
 // Load a dialect's scripts once. Full-line comments are stripped so the
 // documentation in the script files does not travel over the wire on every call.
@@ -138,6 +138,8 @@ function parseReadEach(raw) {
 
 const DIALECTS = {
     bash: {
+        // Path rules of the TARGET's filesystem (common.js checkPath).
+        pathDialect: 'posix',
         scripts: loadScripts('bash', 'sh', {
             list: ['_root', '_helpers', 'list'],
             stat: ['_root', '_helpers', 'stat'],
@@ -161,6 +163,7 @@ const DIALECTS = {
         args: (script) => ['--noprofile', '--norc', '-c', script],
     },
     powershell: {
+        pathDialect: 'windows',
         scripts: loadScripts('powershell', 'ps1', {
             list: ['_root', 'list'],
             stat: ['_root', 'stat'],
@@ -230,6 +233,7 @@ function shell({ root, run, dialect = 'bash' } = {}) {
     if (typeof root !== 'string' || !root) throw new Error('shell({ root }): root is required');
     if (typeof run !== 'function') throw new Error('shell({ run }): run(script, stdin) is required');
 
+    const checkPath = pathChecker(d.pathDialect);
     const call = (method, fields, tail) => run(d.scripts[method], d.frame([root, ...fields], tail));
 
     async function list({ skip = DEFAULT_SKIP } = {}) {
@@ -387,7 +391,7 @@ function shell({ root, run, dialect = 'bash' } = {}) {
         return { ok: false, out: stdout + dec(acc.ERR) };
     }
 
-    return { kind: 'shell', dialect, root, list, stat, read, commit, lock, remove, exec };
+    return { kind: 'shell', dialect, root, checkPath, list, stat, read, commit, lock, remove, exec };
 }
 
 shell.quote = quote;

@@ -51,7 +51,7 @@ function deadPid() {
     return r.pid;
 }
 
-function contract(make) {
+function contract(make, { pathDialect = 'posix' } = {}) {
     it('list: nested files, skip dirs at any depth, dot-dirs pruned, unreadable skipped', async () => {
         const w = workspace({
             'a.js': 'a',
@@ -231,7 +231,11 @@ function contract(make) {
         const w = workspace({ 'a.js': 'a' });
         fs.writeFileSync(path.join(path.dirname(w.root), 'outside.txt'), 'outside');
         const f = make(w.root);
-        for (const bad of ['../outside.txt', '/etc/passwd', 'a/../../outside.txt', '..', '', 'C:/x', '..\\x']) {
+        // Absolute and separator are the TARGET's notions: drive letters and
+        // backslash are only special on a Windows filesystem.
+        const bads = ['../outside.txt', '/etc/passwd', 'a/../../outside.txt', '..', '', 'x\0y'];
+        if (pathDialect === 'windows') bads.push('C:/x', 'C:\\x', '..\\x', 'a\\..\\..\\x', '\\x', '\\\\host\\s\\x');
+        for (const bad of bads) {
             await assert.rejects(() => f.stat([bad]), undefined, `stat ${JSON.stringify(bad)}`);
             await assert.rejects(() => f.read(['a.js', bad]), undefined, `read ${JSON.stringify(bad)}`);
             await assert.rejects(() => f.commit(bad, Buffer.from('x'), { create: true }), undefined, `commit ${bad}`);
@@ -266,6 +270,31 @@ function contract(make) {
         }
         const rep = await f.commit(names[0], Buffer.from('v2'), { expectedHash: sha1(`content of ${names[0]}`) });
         assert.equal(rep.outcome, 'ok');
+        await f.remove(names);
+        for (const n of names) assert.equal(fs.existsSync(w.abs(n)), false, n);
+    });
+
+    it('POSIX: backslash and drive-letter names are ordinary relative names, kept inside the root', {
+        skip: pathDialect === 'posix' ? false : 'POSIX filesystems only',
+    }, async () => {
+        const names = ['d:\\test\\snake\\index.html', 'C:/x/y.js', '..\\x.txt', 'a\\..\\..\\b.txt'];
+        const w = workspace();
+        const f = make(w.root);
+        for (const n of names) {
+            const r = await f.commit(n, Buffer.from(`content of ${n}`), { create: true });
+            assert.equal(r.outcome, 'ok', `${JSON.stringify(n)}: ${JSON.stringify(r)}`);
+            assert.equal(fs.readFileSync(w.abs(n), 'utf8'), `content of ${n}`);
+        }
+        // Every byte landed under the root: a backslash is not a separator here.
+        assert.equal(fs.readdirSync(path.dirname(w.root)).join(','), '.ws-root');
+        assert.deepEqual(fs.readdirSync(w.root).sort(), ['..\\x.txt', 'C:', 'a\\..\\..\\b.txt', 'd:\\test\\snake\\index.html']);
+        assert.deepEqual((await f.list()).map((r) => r.path).sort(), [...names].sort());
+        const st = await f.stat(names, { hash: true });
+        const rd = await f.read(names);
+        for (const n of names) {
+            assert.equal(st.get(n).hash, sha1(`content of ${n}`), n);
+            assert.equal(rd.get(n).toString('utf8'), `content of ${n}`, n);
+        }
         await f.remove(names);
         for (const n of names) assert.equal(fs.existsSync(w.abs(n)), false, n);
     });
@@ -355,7 +384,7 @@ function contract(make) {
 }
 
 describe('localFs', () => {
-    contract((root) => localFs(root));
+    contract((root) => localFs(root), { pathDialect: process.platform === 'win32' ? 'windows' : 'posix' });
 });
 
 describe('shell (bash, local runner)', () => {
@@ -378,5 +407,5 @@ describe('shell (powershell, local runner)', { skip: pwshBin ? false : 'pwsh not
     // Only reached where PowerShell exists. Some POSIX-specific assertions
     // (mode bits, newline filenames) may not hold for .NET on every platform.
     const run = pwshBin ? shell.localRunner('powershell') : null;
-    contract((root) => shell({ root, run, dialect: 'powershell' }));
+    contract((root) => shell({ root, run, dialect: 'powershell' }), { pathDialect: 'windows' });
 });

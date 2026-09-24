@@ -19,7 +19,18 @@
 // Never throws: a lookup that fails is a sentence, not an exception — the
 // conversation around it is still valid, and the sentence says what to do next.
 
-const LOOKUPS = ['code_map', 'code_find', 'code_grep', 'code_outline', 'code_read', 'code_package', 'code_ask'];
+const { pathMatcher, splitList } = require('./grep');
+
+const LOOKUPS = [
+    'code_map',
+    'code_find',
+    'code_grep',
+    'code_glob',
+    'code_outline',
+    'code_read',
+    'code_package',
+    'code_ask',
+];
 const EDITS = ['code_edit', 'code_write'];
 const TOOLS = [...LOOKUPS, ...EDITS];
 
@@ -44,6 +55,8 @@ const subjectOf = (name, args = {}) =>
                 args.file ||
                 args.query ||
                 args.text ||
+                args.pattern ||
+                args.glob ||
                 args.question ||
                 args.name ||
                 args.workspace)) ||
@@ -420,6 +433,48 @@ function createTools({ workspace, workspaces = () => [] } = {}) {
                       .join('\n');
     }
 
+    const listArg = splitList;
+    const num = (v) => (v == null || v === '' || !Number.isFinite(Number(v)) ? undefined : Number(v));
+    const caseArg = (a) => {
+        const v = a.case_sensitive ?? a.caseSensitive ?? a.case;
+        if (v === 'smart') return 'smart';
+        if (v === true || v === 'true' || v === 'sensitive') return true;
+        return false;
+    };
+
+    // rg-style: `file:line: text` for a match and `file-line- text` for
+    // context (the address is copyable as-is into code_read), grouped under
+    // one heading per file, `--` between separated stretches.
+    function renderGrepFile(fileRow, ms, withContext) {
+        const rows = new Map();
+        for (const m of ms) {
+            m.before.forEach((t, j) => {
+                const n = m.line - m.before.length + j;
+                if (!rows.has(n)) rows.set(n, { text: t, hit: false });
+            });
+            rows.set(m.line, { text: m.text, hit: true });
+            m.after.forEach((t, j) => {
+                const n = m.line + 1 + j;
+                if (!rows.has(n)) rows.set(n, { text: t, hit: false });
+            });
+        }
+        const nums = [...rows.keys()].sort((x, y) => x - y);
+        const lines = [];
+        let prev = null;
+        for (const n of nums) {
+            if (withContext && prev !== null && n > prev + 1) lines.push('--');
+            const r = rows.get(n);
+            lines.push(r.hit ? `${fileRow.file}:${n}: ${r.text}` : `${fileRow.file}-${n}- ${r.text}`);
+            prev = n;
+        }
+        const more =
+            fileRow.count > fileRow.shown ? `, showing ${fileRow.shown} — raise max_per_file or narrow the pattern` : '';
+        return (
+            `── ${fileRow.file} (${fileRow.count} matching line${fileRow.count === 1 ? '' : 's'}${more}; at=${fileRow.at})\n` +
+            lines.join('\n')
+        );
+    }
+
     async function codeGrep(ws, a) {
         // THE LITERAL EYE. code_find and code_ask both search by MEANING, and
         // meaning is exactly what fails on the questions a UI task asks.
@@ -429,8 +484,73 @@ function createTools({ workspace, workspaces = () => [] } = {}) {
         // hit, every time. A live task burned 8 lookups over 7 phrasings
         // failing to make that jump, then shelled out for a grep. The index
         // could always answer it; nothing exposed the answer.
-        const q = String(a.text || a.query || '');
-        if (!q) return '(code_grep) — needs `text`: the exact string to look for.';
+        //
+        // And it has to be at least as good as the grep it replaces: the
+        // first version returned ONE line number per file and no text, so
+        // the model learned to sweep the repo with shell grep/sed instead —
+        // minutes per investigation. Every matching line, its text, its
+        // context, regex, case and path filters: rg, over the workspace.
+        const q = String(a.pattern ?? a.text ?? a.query ?? '');
+        if (!q) return '(code_grep) — needs `pattern`: the text (or, with regex: true, the expression) to look for.';
+        if (typeof ws.grep !== 'function') return legacyGrep(ws, q, a);
+        const glob = listArg(a.glob ?? a.globs ?? a.include);
+        const paths = listArg(a.paths ?? a.path ?? a.dir);
+        let r;
+        try {
+            r = await ws.grep(q, {
+                regex: a.regex === true || a.regex === 'true',
+                caseSensitive: caseArg(a),
+                glob,
+                paths,
+                context: num(a.context),
+                before: num(a.before),
+                after: num(a.after),
+                maxMatches: num(a.max_matches ?? a.maxMatches) ?? 100,
+                maxPerFile: num(a.max_per_file ?? a.maxPerFile) ?? 10,
+                // `limit` is the historical "max files".
+                maxFiles: num(a.max_files ?? a.maxFiles ?? a.limit),
+            });
+        } catch (err) {
+            if (err && err.code === 'GREP_BAD_PATTERN') return `(code_grep "${q}") — ${err.message}`;
+            throw err;
+        }
+        const scope = [
+            glob ? `glob ${glob.join(' ')}` : '',
+            paths ? `under ${paths.join(', ')}` : '',
+            r.regex ? 'regex' : '',
+            r.ignoreCase ? 'ignoring case' : 'case-sensitive',
+        ]
+            .filter(Boolean)
+            .join(', ');
+        if (!r.matches.length) {
+            return (
+                `(code_grep "${q}") — ${r.regex ? 'no line matches that expression' : 'that text appears nowhere'} in ${ws.id} (${r.searched} files searched; ${scope}).` +
+                (glob || paths ? ' Check the glob/paths filter, or drop it.' : '') +
+                ' If you expected it to exist, it does not as written: try a shorter distinctive fragment,' +
+                ' the other case, or code_ask to search by meaning.'
+            );
+        }
+        const byFile = new Map();
+        for (const m of r.matches) {
+            if (!byFile.has(m.file)) byFile.set(m.file, []);
+            byFile.get(m.file).push(m);
+        }
+        const total = r.files.reduce((n, f) => n + f.count, 0);
+        const head = `code_grep "${q}" in ${ws.id} — ${total} matching line${total === 1 ? '' : 's'} in ${r.files.length} file${r.files.length === 1 ? '' : 's'} (${r.searched} searched; ${scope}):`;
+        const withContext = r.matches.some((m) => m.before.length || m.after.length);
+        const body = r.files.map((f) => renderGrepFile(f, byFile.get(f.file) || [], withContext)).join('\n\n');
+        const tail = [];
+        if (r.unsearched) {
+            tail.push(
+                `  [stopped at ${r.matches.length} lines — ${r.unsearched} more candidate file(s) not searched; narrow with glob/paths or raise max_matches]`,
+            );
+        }
+        tail.push('  [code_read "<file>:<from>-<to>" for more around a line; code_edit {file, find, body} to change one]');
+        return `${head}\n${body}\n${tail.join('\n')}`;
+    }
+
+    // A host whose workspace object predates grep() (only mentions()).
+    async function legacyGrep(ws, q, a) {
         const limit = Number(a.limit) || 20;
         const hits = await ws.mentions(q, { limit });
         if (!hits.length) {
@@ -444,6 +564,35 @@ function createTools({ workspace, workspaces = () => [] } = {}) {
             `Lines containing "${q}" in ${ws.id} (${hits.length}${hits.length >= limit ? '+' : ''}):\n` +
             hits.map((h) => `  ${h.rel}:${h.line}`).join('\n') +
             `\n  [exact text only — read one with code_read "<file>:<from>-<to>" to see it in context]`
+        );
+    }
+
+    async function codeGlob(ws, a) {
+        const pats = listArg(a.pattern ?? a.glob ?? a.query ?? a.path);
+        if (!pats) return '(code_glob) — needs `pattern`: a glob such as "src/**/*.js", "*.test.js" or "components".';
+        const limit = num(a.limit) ?? 200;
+        let r;
+        if (typeof ws.glob === 'function') r = await ws.glob(pats, { limit });
+        else {
+            // A host whose workspace object predates glob(): the same match
+            // over the listing it already has.
+            const listed = await ws.files({});
+            const m = pathMatcher({ glob: pats });
+            const all = listed.files.filter((f) => !m || m(f.file));
+            r = { ok: true, total: all.length, truncated: all.length > limit, files: all.slice(0, limit) };
+        }
+        if (!r.ok) return `(code_glob) — ${r.reason}`;
+        const label = pats.join(' ');
+        if (!r.total) return `(code_glob "${label}") — no file in ${ws.id} matches.`;
+        return (
+            `code_glob "${label}" in ${ws.id} — ${r.total} file${r.total === 1 ? '' : 's'}:\n` +
+            r.files
+                .map(
+                    (f) =>
+                        `  ${f.file}${f.lines != null ? `  (${f.lines} lines)` : f.size != null ? `  (${f.size} bytes)` : ''}${f.indexed === false ? '  [not searchable]' : ''}`,
+                )
+                .join('\n') +
+            (r.truncated ? `\n  [showing ${r.files.length} of ${r.total} — narrow the glob or raise limit]` : '')
         );
     }
 
@@ -643,6 +792,7 @@ function createTools({ workspace, workspaces = () => [] } = {}) {
         code_map: codeMap,
         code_find: codeFind,
         code_grep: codeGrep,
+        code_glob: codeGlob,
         code_outline: codeOutline,
         code_read: codeRead,
         code_package: codePackage,
@@ -707,12 +857,47 @@ function createTools({ workspace, workspaces = () => [] } = {}) {
             ),
             def(
                 'code_grep',
-                'Find EXACT text (case-insensitive, no regex, no ranking): a CSS class, attribute, label, error string. file:line per matching file. code_find/code_ask match by meaning.',
+                'Search file CONTENTS like ripgrep: every matching line as `line: text`, grouped by file, with optional context lines. Literal text by default (case-insensitive); regex: true for a JavaScript regular expression; glob/paths to restrict which files. Use this INSTEAD of shelling out to grep/rg/sed: it is faster (index-accelerated, and on a remote workspace it searches where the files live), covers exactly the project (no node_modules, .gitignored or secret files), and every hit is a file:line code_read and code_edit accept. code_find/code_ask match by meaning.',
                 {
-                    text: { type: 'string', description: 'The exact text; a short distinctive fragment' },
-                    limit: { type: 'number', description: 'Max files (default 20)' },
+                    pattern: {
+                        type: 'string',
+                        description: 'The text to find (literal), or a JS regex when regex is true. One line.',
+                    },
+                    regex: { type: 'boolean', description: 'Treat pattern as a regular expression (default false)' },
+                    case_sensitive: {
+                        type: 'boolean',
+                        description: 'true = match case exactly; default false = ignore case',
+                    },
+                    glob: {
+                        type: 'array',
+                        items: { type: 'string' },
+                        description:
+                            'Only files matching these globs: "*.js", "src/**/*.ts", "*.{css,html}"; "!pattern" excludes ("!*.test.js", "!dist"). A glob without "/" matches a name at any depth.',
+                    },
+                    paths: {
+                        type: 'array',
+                        items: { type: 'string' },
+                        description: 'Only under these workspace-relative directories or files ("src", "lib/util.js")',
+                    },
+                    context: { type: 'number', description: 'Lines of context before and after each match (default 0)' },
+                    max_matches: { type: 'number', description: 'Max matching lines in total (default 100)' },
+                    max_per_file: { type: 'number', description: 'Max matching lines shown per file (default 10)' },
                 },
-                req('text'),
+                req('pattern'),
+            ),
+            def(
+                'code_glob',
+                'List workspace files whose PATHS match a glob — "src/**/*.ts", "*.test.js", "components", "!dist" — with line counts, from the index (no file is read). Use instead of find/ls in a shell to see what exists before reading.',
+                {
+                    pattern: {
+                        type: 'array',
+                        items: { type: 'string' },
+                        description:
+                            'One or more globs; "!pattern" excludes. Without "/" a glob matches a name at any depth; a glob matching a directory lists everything under it.',
+                    },
+                    limit: { type: 'number', description: 'Max files listed (default 200)' },
+                },
+                req('pattern'),
             ),
             def(
                 'code_outline',

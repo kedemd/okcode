@@ -31,6 +31,7 @@ const { paletteFrom } = require('./analysis/convention-color');
 const textUtil = require('./analysis/text');
 const { chunkCode } = require('./analysis/chunk');
 const { quoteLines, asQuery } = require('./store');
+const { compileMatcher, matchText, pathMatcher } = require('./grep');
 
 const DEFAULTS = {
     // A whole-file read is capped by LINES, not bytes: a truncated read must
@@ -278,6 +279,8 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
     let generation = 0;
     // rel -> 'save' | 'remove' (last op wins); flushed as one transaction.
     const pending = new Map();
+    // rel -> in-flight count: handed to the store, write not yet settled.
+    const flushing = new Map();
     const pendingPackages = [];
     // Files the store refused to write (rel → error): a scan error, reported
     // by structure() until a later write of the same file succeeds.
@@ -593,6 +596,45 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
         return rows;
     }
 
+    // The project's files as the facade lists them right now — metadata only,
+    // one list call — under the same exclusions every scan applies. Shared by
+    // the open-time walk and by the verbs that must answer before that walk
+    // has finished (grep, glob): the index is an accelerator, never a gate.
+    async function listTree(warn = () => {}) {
+        const [listed, gi] = await Promise.all([
+            access.list(opts.skip ? { skip: opts.skip } : {}),
+            access.read(['.gitignore']).catch(() => new Map()),
+        ]);
+        const gitignored = compileGitignore(gi.get('.gitignore') ? gi.get('.gitignore').toString('utf8') : '');
+        // Dot-directories BELOW the root are working state, not project (a
+        // workspace carried 13.4 MB of leftover LMDB in .smoke-data and
+        // friends). The shipped facades already prune them; a custom facade
+        // may not. .gitignore is the second filter, for a working-state
+        // directory with no leading dot.
+        //
+        // A name the facade itself cannot address (its own dialect's path
+        // rules: a Windows facade listing a name it would refuse) is skipped
+        // with a warning here, before it can reach a batched stat or read
+        // and fail every other file with it.
+        const addressable = (rel) => {
+            if (typeof access.checkPath !== 'function') return true;
+            try {
+                access.checkPath(rel);
+                return true;
+            } catch (err) {
+                warn(rel, err);
+                return false;
+            }
+        };
+        return listed.filter(
+            (r) =>
+                !/(^|\/)\.[^/]+\//.test(r.path) &&
+                !OWN_TRANSIENT.test(r.path) &&
+                !gitignored(r.path) &&
+                addressable(r.path),
+        );
+    }
+
     // The OPEN/sync primitive: ONE tree-wide list (path+size+mtime, no
     // hashing), then hash ONLY the rows whose (size, mtime) differ from the row
     // this index already holds. A repeat walk of an untouched tree costs one
@@ -609,39 +651,9 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
     // file even when nothing moved — the rebuild primitive, deliberately
     // explicit, the one operation here that costs real time.
     async function fullScan({ rewrite = false, rehash = false } = {}) {
-        const [listed, gi] = await Promise.all([
-            access.list(opts.skip ? { skip: opts.skip } : {}),
-            access.read(['.gitignore']).catch(() => new Map()),
-        ]);
-        const gitignored = compileGitignore(gi.get('.gitignore') ? gi.get('.gitignore').toString('utf8') : '');
-        // Dot-directories BELOW the root are working state, not project (a
-        // workspace carried 13.4 MB of leftover LMDB in .smoke-data and
-        // friends). The shipped facades already prune them; a custom facade
-        // may not. .gitignore is the second filter, for a working-state
-        // directory with no leading dot.
         scanWarnings.clear();
         const warn = (rel, err) => scanWarnings.set(rel, String((err && err.message) || err).slice(0, 300));
-        // A name the facade itself cannot address (its own dialect's path
-        // rules: a Windows facade listing a name it would refuse) is skipped
-        // with a warning here, before it can reach a batched stat or read
-        // and fail every other file with it.
-        const addressable = (rel) => {
-            if (typeof access.checkPath !== 'function') return true;
-            try {
-                access.checkPath(rel);
-                return true;
-            } catch (err) {
-                warn(rel, err);
-                return false;
-            }
-        };
-        const rows = listed.filter(
-            (r) =>
-                !/(^|\/)\.[^/]+\//.test(r.path) &&
-                !OWN_TRANSIENT.test(r.path) &&
-                !gitignored(r.path) &&
-                addressable(r.path),
-        );
+        const rows = await listTree(warn);
         const seen = new Set();
         const needHash = [];
         const toRead = [];
@@ -799,11 +811,21 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
             else if (files.has(rel)) saves.push(files.get(rel));
         }
         pending.clear();
+        // Out of `pending` but not yet searchable in the store: grep's index
+        // pre-filter must not take these rows' absence as an answer.
+        const batch = [...saves.map((f) => f.rel), ...removals];
+        for (const rel of batch) flushing.set(rel, (flushing.get(rel) || 0) + 1);
         let result;
         try {
             result = await store.saveFiles(saves, removals);
         } catch {
             /* the store is a cache; a failed write is a cold start, not a crash */
+        } finally {
+            for (const rel of batch) {
+                const n = (flushing.get(rel) || 1) - 1;
+                if (n > 0) flushing.set(rel, n);
+                else flushing.delete(rel);
+            }
         }
         // One file the store cannot take is left out of the batch, not the
         // batch with it — and is named, not silently absent after a restart.
@@ -914,6 +936,170 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
             if (out.length >= limit) break;
         }
         return out;
+    }
+
+    // ── grep / glob ─────────────────────────────────────────────────────
+    // Whether the working set can stand in for the tree. A store that loaded
+    // rows is a (possibly stale) index from the start — its open-time walk is
+    // cheap, only what moved is read. A COLD workspace is not: its first walk
+    // reads and parses every file, and a grep must not wait minutes behind
+    // it. Until that walk lands, grep and glob answer from the facade's own
+    // listing and reads instead (`indexed: false` / glob's `via: 'direct'`).
+    const warmAtStart = files.size > 0;
+    const indexReady = () => warmAtStart || lastScanAt > 0 || (opened && !scanning);
+    // A verb that answered around the index still starts the walk it skipped,
+    // so the next question finds it ready.
+    const warmUp = () => {
+        if (!opened && !scanning) refresh().catch(() => {});
+    };
+
+    // The searchable files, as [{ rel, size }] sorted by path: the working set
+    // when the index is ready, else a fresh listing.
+    async function grepUniverse(ready) {
+        if (ready) {
+            await ensureOpen();
+            return list()
+                .filter((f) => f.indexed !== false && !isSecret(f.path))
+                .map((f) => ({ rel: f.rel, size: f.size }))
+                .sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
+        }
+        warmUp();
+        return (await listTree())
+            .filter((r) => isTextual(r.path, r.size))
+            .map((r) => ({ rel: r.path, size: r.size }))
+            .sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
+    }
+
+    // Narrow the files that could match a LITERAL, cheapest sound source
+    // first. Every accelerator returns a SUPERSET of the matching files or
+    // nothing at all — a miss here would be a wrong answer, not a slow one.
+    //   target  the facade decides on the machine holding the files
+    //           (filesContaining — a C-locale fixed-string grep there) and
+    //           only the files that match cross the transport; also the
+    //           freshest answer, since it reads the files as they are now.
+    //   index   the content full-text index, when it has caught up — plus
+    //           every file it cannot vouch for: not yet flushed, refused by
+    //           the store, or moved on disk since its row (one metadata stat).
+    async function narrow(rels, matcher, ready) {
+        if (matcher.literal === null || !rels.length) return { rels, via: ready ? 'scan' : 'direct' };
+        if (typeof access.filesContaining === 'function') {
+            let hit = null;
+            try {
+                hit = await access.filesContaining(rels, matcher.literal, { ignoreCase: matcher.ignoreCase });
+            } catch {
+                hit = null;
+            }
+            if (hit) return { rels: rels.filter((r) => hit.has(r)), via: 'target' };
+        }
+        if (ready && store && typeof store.contentCandidates === 'function') {
+            const fts = store.contentCandidates(matcher.literal);
+            if (fts) {
+                const moved = await movedOf(rels);
+                if (moved) {
+                    const keep = new Set(fts);
+                    for (const r of moved) keep.add(r);
+                    for (const r of pending.keys()) keep.add(r);
+                    for (const r of flushing.keys()) keep.add(r);
+                    for (const r of storeErrors.keys()) keep.add(r);
+                    return { rels: rels.filter((r) => keep.has(r)), via: 'index' };
+                }
+            }
+        }
+        return { rels, via: ready ? 'scan' : 'direct' };
+    }
+
+    // Text for a batch of files, as Map<rel, { text, at }>. Ready: verified
+    // against the files first (stat-first; only what moved or is not cached is
+    // read, and a moved file is re-recorded), then served from the records.
+    // Direct: read as-is, nothing recorded — the open-time walk owns that.
+    async function grepTexts(rels, ready) {
+        const out = new Map();
+        if (ready) {
+            await verify(rels);
+            for (const rel of rels) {
+                const f = files.get(rel);
+                if (f && typeof f.content === 'string') out.set(rel, { text: f.content, at: f.hash });
+            }
+            return out;
+        }
+        const got = await readMany(rels, () => 0, { onFileError: () => {} });
+        for (const [rel, buf] of got) out.set(rel, { text: textUtil.decode(buf).text, at: sha1(buf) });
+        return out;
+    }
+
+    async function grepAll(pattern, o = {}) {
+        const t0 = Date.now();
+        const int = (v, dflt, lo, hi) => {
+            if (v == null || v === '') return dflt;
+            const n = Number(v);
+            return Number.isFinite(n) ? Math.max(lo, Math.min(hi, Math.floor(n))) : dflt;
+        };
+        const matcher = compileMatcher(pattern, { regex: !!o.regex, caseSensitive: o.caseSensitive ?? false });
+        const context = int(o.context, 0, 0, 50);
+        const before = int(o.before, context, 0, 50);
+        const after = int(o.after, context, 0, 50);
+        const maxMatches = int(o.maxMatches, 200, 1, 100000);
+        const maxPerFile = int(o.maxPerFile, 50, 1, 100000);
+        const maxFiles = int(o.maxFiles, Infinity, 1, Infinity);
+        const inPath = pathMatcher({ glob: o.glob, paths: o.paths });
+
+        const ready = indexReady();
+        const universe = (await grepUniverse(ready)).filter((r) => !inPath || inPath(r.rel));
+        const { rels, via } = await narrow(
+            universe.map((r) => r.rel),
+            matcher,
+            ready,
+        );
+
+        const matches = [];
+        const perFile = [];
+        let truncated = false;
+        let unsearched = 0;
+        const B = Math.max(1, opts.readBatchFiles);
+        for (let i = 0; i < rels.length; i += B) {
+            if (matches.length >= maxMatches || perFile.length >= maxFiles) {
+                truncated = true;
+                unsearched = rels.length - i;
+                break;
+            }
+            const chunk = rels.slice(i, i + B);
+            const texts = await grepTexts(chunk, ready);
+            for (let k = 0; k < chunk.length; k++) {
+                const rel = chunk[k];
+                const got = texts.get(rel);
+                if (!got) continue;
+                if (matches.length >= maxMatches || perFile.length >= maxFiles) {
+                    truncated = true;
+                    unsearched = rels.length - i - k;
+                    break;
+                }
+                const room = Math.min(maxPerFile, maxMatches - matches.length);
+                const r = matchText(got.text, matcher, { before, after, maxPerFile: room });
+                if (!r.count) continue;
+                for (const m of r.matches) matches.push({ file: rel, ...m });
+                perFile.push({ file: rel, count: r.count, shown: r.matches.length, at: got.at });
+                if (r.count > r.matches.length) truncated = true;
+            }
+            if (unsearched) break;
+        }
+        return {
+            ok: true,
+            id,
+            pattern: matcher.source,
+            regex: matcher.regex,
+            ignoreCase: matcher.ignoreCase,
+            matches,
+            files: perFile,
+            searched: universe.length,
+            candidates: rels.length,
+            via,
+            // false: answered before the index was ready (straight from the
+            // facade's listing and reads).
+            indexed: ready,
+            truncated,
+            ...(unsearched ? { unsearched } : {}),
+            elapsedMs: Date.now() - t0,
+        };
     }
 
     // Resolve a name to exactly one symbol, or report the ambiguity honestly.
@@ -1933,6 +2119,81 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
             return hits;
         },
 
+        // ── grep ────────────────────────────────────────────────────────
+        // rg for a workspace: EVERY matching line of every file, with its
+        // text and optional context — the verb a caller would otherwise
+        // shell out for.
+        //
+        //   grep(pattern, {
+        //       regex = false,          // JS RegExp syntax when true
+        //       caseSensitive = false,  // true | false | 'smart'
+        //       glob,                   // '*.js' | ['src/**', '!*.test.js']
+        //       paths,                  // ['src', 'lib/x.js'] — dirs or files
+        //       context = 0, before, after,   // lines around each match
+        //       maxMatches = 200, maxPerFile = 50, maxFiles = ∞,
+        //   }) → { ok, matches: [{ file, line, col, text, before[], after[] }],
+        //          files: [{ file, count, shown, at }], searched, candidates,
+        //          via, indexed, truncated, unsearched?, elapsedMs }
+        //
+        // Files in path order; `count` keeps counting past maxPerFile, and
+        // `truncated` says some matching line was not returned. `via` names
+        // what chose the files that were read: 'target' (the facade grepped
+        // where the files live), 'index' (full-text pre-filter), 'scan'
+        // (every file, from the index's records) or 'direct' (every file,
+        // straight from the facade — the index was not ready yet). The
+        // index only ever NARROWS a search it can prove complete; otherwise
+        // every searchable file is read. Withheld files (secrets, binaries)
+        // are never searched. A bad pattern throws (code GREP_BAD_PATTERN).
+        async grep(pattern, options = {}) {
+            return grepAll(pattern, options || {});
+        },
+
+        // ── glob ────────────────────────────────────────────────────────
+        // Workspace paths matching one glob or a list (rg syntax, `!` to
+        // exclude; a glob without '/' matches a name at any depth, and one
+        // that matches a directory takes its subtree). Metadata only — no
+        // file is read. Before the index is ready, answered from the
+        // facade's listing (`via: 'direct'`, no line counts).
+        async glob(pattern, { limit = 0 } = {}) {
+            const pats = [].concat(pattern == null ? [] : pattern).filter((p) => typeof p === 'string' && p.trim());
+            if (!pats.length) return { ok: false, reason: 'glob needs a pattern, e.g. "src/**/*.js" or "*.test.js"' };
+            const m = pathMatcher({ glob: pats });
+            const ready = indexReady();
+            let rows;
+            if (ready) {
+                await ensureOpen();
+                rows = list().map((f) => ({
+                    file: f.rel,
+                    size: f.size == null ? null : f.size,
+                    lines: f.lines == null ? null : f.lines,
+                    lang: f.lang || null,
+                    indexed: f.indexed !== false,
+                }));
+            } else {
+                warmUp();
+                rows = (await listTree()).map((r) => ({
+                    file: r.path,
+                    size: r.size == null ? null : r.size,
+                    lines: null,
+                    lang: langOf(r.path),
+                    indexed: isTextual(r.path, r.size),
+                }));
+            }
+            rows = rows.filter((r) => !m || m(r.file)).sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0));
+            const total = rows.length;
+            const n = Number(limit) > 0 ? Math.floor(Number(limit)) : 0;
+            if (n) rows = rows.slice(0, n);
+            return {
+                ok: true,
+                id,
+                pattern: pats,
+                total,
+                truncated: rows.length < total,
+                via: ready ? 'index' : 'direct',
+                files: rows,
+            };
+        },
+
         // ── refs ────────────────────────────────────────────────────────
         // "Where is this USED?" — the question that actually costs cycles.
         // The `textual` confidence tier: match the text, then attribute every
@@ -2531,6 +2792,9 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
         // Persist what is pending and detach from the store. The store and
         // the okdb instance stay open — they belong to the caller.
         async close() {
+            // A walk a grep or glob started in the background finishes (or
+            // fails) before the store it writes to is let go.
+            if (scanning) await scanning.catch(() => {});
             await flush();
             if (store) store.setTextSource(null);
         },

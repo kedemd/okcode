@@ -118,7 +118,7 @@ describe('tools', () => {
         assert.match(out, /code_read/);
         const miss = await tools.render('code_grep', { text: 'nowhere-in-this-tree' });
         assert.match(miss, /appears nowhere/);
-        assert.match(await tools.render('code_grep', {}), /needs `text`/);
+        assert.match(await tools.render('code_grep', {}), /needs `pattern`/);
     });
 
     it('code_outline: pieces with ranges and the at', async () => {

@@ -62,6 +62,10 @@ Advisory, cross-process lock around a commit (narrows the window between the com
 
 Run a command in the workspace root (`out` = stdout, or stdout+stderr on failure; PowerShell merges stderr into `out`). Used only for opt-in checks (e.g. `node --check` on the target machine). **A capability, not a default:** a host grants it per workspace; okcode never needs it to find, read or edit.
 
+### `filesContaining(paths, text, { ignoreCase = false }) → Set<path> | null`
+
+A pre-filter for grep: which of `paths` contain the literal `text` (one line, no NUL), decided where the files live so a remote search moves only the files that match. It must return a **superset** of the files okcode's own matcher would accept — byte-exact for a case-sensitive search, ASCII-only case folding for `ignoreCase` (okcode only asks that for an ASCII literal) — or `null` when it cannot answer; `null` makes okcode read every file, so a facade must never answer "none" when it means "don't know". The bash shell facade implements it with a C-locale `grep -l -a -s -F --null` (probed first; GNU, BSD and ugrep); PowerShell and localFs do not (a local read is already cheap).
+
 ### `remove(paths) → void`
 
 Delete files (best effort). Not used by edits today; reserved for file deletion verbs.

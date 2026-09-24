@@ -238,4 +238,92 @@ describe('store', () => {
         assert.equal(bytes.indexOf(CODE), -1, 'code not stored');
         fs.rmSync(own, { recursive: true, force: true });
     });
+
+    // okdb ≥ 2.3.2 ABORTS a write whose indexed field (symbols.name) is not a
+    // scalar, where it used to store the row unindexed. A computed key such
+    // as `[/re/]` handed the parser a RegExp for a name, and saveFiles writes
+    // a whole burst in one transaction — so one such file lost every file in
+    // the batch, across a restart.
+    const COMPUTED = [
+        "const sym = Symbol('s');",
+        'function make() {',
+        '    return {',
+        '        [/re/]() {},',
+        '        [42]() {},',
+        '        [`t${1}`]() {},',
+        '        [sym]() {},',
+        '        [Symbol.iterator]() {},',
+        '    };',
+        '}',
+        'class Keys {',
+        '    [/cre/]() {}',
+        '    [Symbol.asyncIterator]() {}',
+        '    [7]() {}',
+        '}',
+        'module.exports = { make, Keys };',
+        '',
+    ].join('\n');
+
+    it('computed member keys (regex, number, template, symbol) index end to end and persist', async () => {
+        const root = project('computed');
+        fs.writeFileSync(path.join(root, 'lib', 'computed-keys.js'), COMPUTED);
+        const st = await openStore({ db, id: 'computed', access: localFs(root) });
+        const ws = await openWorkspace({ id: 'computed', access: localFs(root), store: st });
+        await ws.sync();
+        assert.deepEqual((await ws.structure()).unsaved, [], 'nothing refused by the store');
+        const read = await ws.read('Keys.[/cre/]');
+        assert.ok(JSON.stringify(read).includes('[/cre/]() {}'), 'addressable by its source name');
+        await ws.close();
+
+        const loaded = (await openStore({ db, id: 'computed', access: localFs(root) })).load();
+        assert.equal(loaded.files.size, FIXTURE_FILES.length + 1, 'every file of the batch persisted');
+        const f = loaded.files.get('lib/computed-keys.js');
+        assert.ok(f, 'the computed-key file persisted');
+        const paths = f.symbols.map((s) => s.path);
+        for (const p of ['make.[/re/]', 'make.42', 'make.[`t${1}`]', 'make.[sym]', 'Keys.[/cre/]', 'Keys.7'])
+            assert.ok(paths.includes(p), `${p} in ${paths.join(', ')}`);
+        assert.ok(f.symbols.every((s) => typeof s.name === 'string'));
+        // The name index answers for them.
+        const env = await db.openEnv(envNameFor('computed'));
+        const rows = [...env.query('symbols', { name: '[Symbol.iterator]' }, { index: ['name'] })];
+        assert.equal(rows.length, 1);
+        assert.equal(loaded.files.get('lib/math.js').symbols.length > 0, true, 'the rest of the batch too');
+    });
+
+    it('a row the store cannot write fails alone, not the batch — and is reported', async () => {
+        const logs = [];
+        const st = await openStore({ db, id: 'isolate', access: localFs(base), log: (m) => logs.push(m) });
+        const file = (rel, sym = {}) => ({
+            rel,
+            hash: `h-${rel}`,
+            size: 1,
+            mtime: 1,
+            lang: 'javascript',
+            lines: 1,
+            parsed: true,
+            symbols: [{ name: 'f', path: 'f', kind: 'function', lineStart: 1, lineEnd: 1, ...sym }],
+        });
+        const circular = {};
+        circular.self = circular;
+        const r = await st.saveFiles([
+            file('a.js'),
+            // A non-string name from an analyser is coerced, not fatal.
+            file('b.js', { name: /rx/, path: 'rx' }),
+            // A row that cannot be encoded at all.
+            file('bad.js', { signature: circular }),
+            file('c.js'),
+        ]);
+        assert.deepEqual(
+            r.failed.map((x) => x.rel),
+            ['bad.js'],
+        );
+        assert.equal(r.written, 3);
+        const loaded = st.load();
+        assert.deepEqual([...loaded.files.keys()].sort(), ['a.js', 'b.js', 'c.js']);
+        assert.equal(loaded.files.get('b.js').symbols[0].name, '/rx/');
+        assert.ok(
+            logs.some((m) => m.includes('bad.js')),
+            'the failure is logged',
+        );
+    });
 });

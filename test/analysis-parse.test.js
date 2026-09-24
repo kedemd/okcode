@@ -247,3 +247,56 @@ test('registerExtractor adds a language without touching extract()', () => {
         throw new Error('x');
     });
 });
+
+// A computed key's node value is not a name: `[/re/]` handed the index a
+// RegExp, `[42]` a number — and okdb (≥ 2.3.2) aborts a write whose indexed
+// field is not a scalar, taking the whole batch with it.
+test('computed member keys are named by their source, always as strings', () => {
+    const src = [
+        "const sym = Symbol('s');",
+        'function make() {',
+        '    return {',
+        '        [/re/]() {},',
+        '        [42]() {},',
+        "        ['lit']() {},",
+        '        [`tpl`]() {},',
+        '        [`t${sym.description}`]() {},',
+        '        [sym]() {},',
+        '        [Symbol.iterator]() {},',
+        '        0() {},',
+        '        plain() {},',
+        '    };',
+        '}',
+        'class K {',
+        '    [/cre/g]() {}',
+        '    [Symbol.asyncIterator]() {}',
+        '    [9]() {}',
+        '    ok() {}',
+        '}',
+        'module.exports = { make, K };',
+        '',
+    ].join('\n');
+    const r = extract('keys.js', src);
+    assert.equal(r.parsed, true);
+    for (const s of r.symbols) {
+        assert.equal(typeof s.name, 'string', `name of ${s.path}`);
+        assert.equal(typeof s.path, 'string', `path of ${s.name}`);
+    }
+    const paths = r.symbols.map((s) => s.path);
+    for (const p of [
+        'make.[/re/]',
+        'make.42',
+        'make.lit',
+        'make.tpl',
+        'make.[`t${sym.description}`]',
+        'make.[sym]',
+        'make.[Symbol.iterator]',
+        'make.0',
+        'make.plain',
+        'K.[/cre/g]',
+        'K.[Symbol.asyncIterator]',
+        'K.9',
+        'K.ok',
+    ])
+        assert.ok(paths.includes(p), `${p} in ${paths.join(', ')}`);
+});

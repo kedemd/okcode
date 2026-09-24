@@ -274,18 +274,25 @@ async function openStore({ db, id, access, profiles = [], log = () => {} } = {})
         }
     }
 
+    // Whether THIS process may create (or repair) a profile's embedder and
+    // pipeline. okdb needs engines for both. A process without them (the
+    // host opened it passive) never creates anything: it attaches to the
+    // pipeline an indexing process created, and until one exists the profile
+    // is PENDING — configured, not broken — and attaches on a later ask() or
+    // profiles() (status). The host decides the roles; okcode never flips them.
+    const createsPipelines = () => db.role?.engines !== false;
+
     async function ensureProfile(profile) {
         const { name, embedder } = profile || {};
         if (!name) throw new Error('an embedding profile needs a name');
         if (!embedder || typeof embedder !== 'object') throw new Error(`profile "${name}" needs an embedder config`);
-        const model = modelOf(embedder);
         // The vector space this profile embeds into, minus the dims (below).
         // okcode's profiles carry it (the provider, not a derived factory
         // type); a bare store profile falls back to its embedder config.
         const parts = profile.identity || identity.partsOf(embedder);
         const st = {
             name,
-            model,
+            model: modelOf(embedder),
             parts,
             dims: null,
             identity: null,
@@ -293,8 +300,44 @@ async function openStore({ db, id, access, profiles = [], log = () => {} } = {})
             scoped: null,
             embedderName: null,
             error: null,
+            // Why the profile is waiting (a passive process, no pipeline yet),
+            // or null. Never an error: it resolves itself once the indexing
+            // process has created the pipeline.
+            pending: null,
+            spec: profile,
+            attaching: null,
         };
         profileState.set(name, st);
+        await attach(st);
+        return st;
+    }
+
+    // One attempt to bring a profile up — create/repair where engines run,
+    // attach-only elsewhere. Concurrent callers share the attempt.
+    function attach(st) {
+        if (!st.attaching) {
+            st.attaching = attachOnce(st).finally(() => {
+                st.attaching = null;
+            });
+        }
+        return st.attaching;
+    }
+
+    // A pending profile (passive process) tries again: cheap — durable
+    // record reads, no model call. Called on every ask() and profiles().
+    async function retryPending() {
+        for (const st of profileState.values()) if (st.pending) await attach(st);
+    }
+
+    async function attachOnce(st) {
+        const { name, parts, spec: profile } = st;
+        const { embedder } = profile;
+        const creates = createsPipelines();
+        // Pending carries no pipeline: status must not report the indexer
+        // stats of a pipeline nobody has created.
+        const wait = (why) => {
+            Object.assign(st, { pending: why, error: null, pipeline: null, scoped: null });
+        };
         try {
             let dims = profile.dims || embedder.dims || null;
             if (!dims && db.embeddings.resolveModelDims)
@@ -302,6 +345,9 @@ async function openStore({ db, id, access, profiles = [], log = () => {} } = {})
             if (!dims) dims = await dimsFromRecords(parts);
             let embedderRef = null;
             if (!dims) {
+                // A passive process must not probe the model (that starts an
+                // engine): the dims arrive with the indexing process's record.
+                if (!creates) return wait('waiting for an indexing process to create the pipeline');
                 // Dimensionality is the model's to state, not ours to assume.
                 // Start the embedder on its own (probing it) and hand the
                 // same engine to the pipeline. Named after the space too: a
@@ -314,18 +360,20 @@ async function openStore({ db, id, access, profiles = [], log = () => {} } = {})
                     (await db.embeddings.createEmbedder(embName, embedder, {}, envName));
                 const health = engine && engine.api && (await engine.api.health?.());
                 dims = (engine && engine.api && engine.api.dims) || (health && health.dims) || null;
-                if (!dims) throw new Error(`could not learn the dimensions of ${model} — pass dims`);
+                if (!dims) throw new Error(`could not learn the dimensions of ${st.model} — pass dims`);
                 embedderRef = { name: embName };
             }
             const pipeline = identity.pipelineName(parts, dims);
             const scoped = `${envName}:${pipeline}`;
             Object.assign(st, { dims, pipeline, scoped, identity: identity.identityOf(parts, dims) });
             let existing = await env.pipelines.getRecord(pipeline);
+            if (!existing && !creates) return wait('waiting for an indexing process to create the pipeline');
             // A record is not proof of a working pipeline: one whose member engines are gone (an
             // interrupted first boot, members removed under it) never indexes. Where engines run,
             // hand it back to createPipeline, which re-creates the missing members (okdb ≥ 2.3.1;
-            // an older okdb refuses and the profile reports that error).
-            if (existing && db.role?.engines !== false) {
+            // an older okdb refuses and the profile reports that error). A passive process
+            // attaches as-is and leaves the repair to the indexing process.
+            if (existing && creates) {
                 const missing = await missingMembers(pipeline);
                 if (missing.length) {
                     log(`[okcode] pipeline ${pipeline} is missing ${missing.join(', ')} — repairing it`);
@@ -350,21 +398,31 @@ async function openStore({ db, id, access, profiles = [], log = () => {} } = {})
             // but not the thing it embeds with. Start it explicitly wherever
             // engines run; a process without engines only searches (okdb
             // embeds a query locally from the persisted embedder record).
-            if (db.role?.engines !== false && st.embedderName) {
+            if (creates && st.embedderName) {
                 const eng = db.engines.getEngine?.('embedder', st.embedderName);
                 if (eng && !eng.isRunning && typeof eng.start === 'function') await eng.start().catch(() => {});
             }
+            // okdb reads a pipeline's durable doc status from its vector
+            // sub-env, which a process opens only for envs it saw at boot or
+            // touched since. A passive process that attached to a pipeline
+            // created AFTER it opened would otherwise report every doc as
+            // pending until its first search.
+            if (!creates) await db.embeddings._ensureTypeEnv?.(envName, FILES).catch(() => {});
+            Object.assign(st, { pending: null, error: null });
         } catch (err) {
             st.error = err.message;
+            st.pending = null;
             log(`[okcode] embedding profile ${name} unavailable: ${err.message}`);
         }
-        return st;
     }
     for (const p of profiles) await ensureProfile(p);
 
     function profileFor(name) {
         if (!profileState.size) return null;
-        if (name == null) return [...profileState.values()].find((p) => !p.error) || null;
+        if (name == null) {
+            const all = [...profileState.values()];
+            return all.find((p) => !p.error && !p.pending) || all.find((p) => !p.error) || null;
+        }
         return profileState.get(name) || null;
     }
 
@@ -532,6 +590,8 @@ async function openStore({ db, id, access, profiles = [], log = () => {} } = {})
         },
 
         // ── embeddings ──────────────────────────────────────────────────
+        // True when some profile is usable or pending (a passive process
+        // waiting for the pipeline): ask() then attaches or says it waits.
         hasProfiles() {
             return [...profileState.values()].some((p) => !p.error);
         },
@@ -543,6 +603,7 @@ async function openStore({ db, id, access, profiles = [], log = () => {} } = {})
         // Per profile: name, model, pipeline, dims, and the indexer's own
         // progress (live where this process runs it, durable otherwise).
         async profiles() {
+            await retryPending();
             const out = [];
             for (const p of profileState.values()) {
                 let status = null;
@@ -563,6 +624,7 @@ async function openStore({ db, id, access, profiles = [], log = () => {} } = {})
                     dims: p.dims,
                     identity: p.identity,
                     error: p.error,
+                    pending: p.pending,
                     status,
                 });
             }
@@ -596,6 +658,7 @@ async function openStore({ db, id, access, profiles = [], log = () => {} } = {})
         // (OKCODE_IDENTITY_MISMATCH).
         async ask(query, { profile = null, limit = 8, text = false } = {}) {
             const q = asQuery(query);
+            await retryPending();
             const p = profileFor(profile);
             if (!p) {
                 const err = new Error(
@@ -609,6 +672,15 @@ async function openStore({ db, id, access, profiles = [], log = () => {} } = {})
             if (p.error) {
                 const err = new Error(`embedding profile "${p.name}" is unavailable: ${p.error}`);
                 err.code = 'OKCODE_NO_EMBEDDINGS';
+                throw err;
+            }
+            if (p.pending) {
+                // Not an error in the profile — the vectors are not there
+                // YET. Same code, so a caller's "no semantic eye" fallback
+                // covers it; `pending` tells the two apart.
+                const err = new Error(`embedding profile "${p.name}" is pending: ${p.pending}`);
+                err.code = 'OKCODE_NO_EMBEDDINGS';
+                err.pending = true;
                 throw err;
             }
             if (q.vector) {

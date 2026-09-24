@@ -82,6 +82,24 @@ function envNameFor(id) {
 // same file are two different symbols that share a name.
 const symKey = (rel, symPath, line) => `${rel}::${symPath}::${line}`;
 
+// SYMBOLS is indexed on `file` and `name`, and okdb (≥ 2.3.2) ABORTS a write
+// whose indexed field is not a scalar (INVALID_INDEX_KEY) — where it used to
+// store the row and leave it out of the index. Both fields are names, so they
+// are written as strings, whatever an analyser handed over: a parser or an
+// external extension that produced a RegExp or a number for a name must cost
+// that symbol its exact spelling at worst, never the batch it rode in on.
+function indexedText(v) {
+    if (typeof v === 'string') return v;
+    if (v == null) return '';
+    if (typeof v === 'number' || typeof v === 'bigint' || typeof v === 'boolean' || v instanceof RegExp)
+        return String(v);
+    try {
+        return JSON.stringify(v) || String(v);
+    } catch {
+        return String(v);
+    }
+}
+
 // The query's own terms decide which lines to quote — stopwords are already
 // out of the index, so they must be out of this too or every line with "the"
 // in it looks like a match.
@@ -474,22 +492,29 @@ async function openStore({ db, id, access, profiles = [], log = () => {} } = {})
         //
         // okdb's transaction() returns a BUILDER: operations are staged on it
         // synchronously and committed once. It does NOT take a callback.
+        //
+        // Fault-isolated: one transaction means one bad row aborts every file
+        // in it, so a failed batch is retried a file at a time, and only the
+        // file that cannot be written is left out. Its old rows stay as they
+        // were (their hash no longer matches, so the next scan re-parses it),
+        // and it comes back in `failed` for the caller to report.
+        // → { written, failed: [{ rel, error }] }
         async saveFiles(saves = [], removals = []) {
-            if (!saves.length && !removals.length) return;
-            const txn = env.transaction();
+            if (!saves.length && !removals.length) return { written: 0, failed: [] };
             // One indexed lookup per touched file, never a scan of every
             // symbol per file.
             const staleSymbols = (rel) => env.query(SYMBOLS, { file: rel }, { index: ['file'], prefix: [rel] });
-            for (const rel of removals) {
+            const stageRemoval = (txn, rel) => {
                 txn.remove(FILES, rel);
                 for (const { key } of staleSymbols(rel)) txn.remove(SYMBOLS, key);
-            }
-            for (const file of saves) {
+            };
+            const stageSave = (txn, file) => {
+                const rel = indexedText(file.rel);
                 // Stale symbol rows go first, so a symbol deleted from the
                 // source does not linger in the graph.
-                for (const { key } of staleSymbols(file.rel)) txn.remove(SYMBOLS, key);
-                txn.put(FILES, file.rel, {
-                    rel: file.rel,
+                for (const { key } of staleSymbols(rel)) txn.remove(SYMBOLS, key);
+                txn.put(FILES, rel, {
+                    rel,
                     hash: file.hash,
                     size: file.size,
                     mtime: file.mtime,
@@ -515,9 +540,13 @@ async function openStore({ db, id, access, profiles = [], log = () => {} } = {})
                     lossless: file.lossless !== false,
                 });
                 for (const s of file.symbols || []) {
-                    txn.put(SYMBOLS, symKey(file.rel, s.path || s.name, s.lineStart), {
-                        file: file.rel,
-                        name: s.name,
+                    const name = indexedText(s.name);
+                    if (name !== s.name)
+                        log(`[okcode] ${rel}: symbol name ${String(s.name)} is not a string — stored as "${name}"`);
+                    const symPath = indexedText(s.path || name);
+                    txn.put(SYMBOLS, symKey(rel, symPath, s.lineStart), {
+                        file: rel,
+                        name,
                         kind: s.kind,
                         lineStart: s.lineStart,
                         lineEnd: s.lineEnd,
@@ -526,15 +555,39 @@ async function openStore({ db, id, access, profiles = [], log = () => {} } = {})
                         // symbol from a fresh scan does.
                         start: Number.isInteger(s.start) ? s.start : null,
                         end: Number.isInteger(s.end) ? s.end : null,
-                        path: s.path || s.name,
+                        path: symPath,
                         parent: s.parent || null,
                         signature: s.signature || null,
                         doc: s.doc || '',
                         exported: !!s.exported,
                     });
                 }
+            };
+            const failed = [];
+            let written = saves.length + removals.length;
+            try {
+                const txn = env.transaction();
+                for (const rel of removals) stageRemoval(txn, rel);
+                for (const file of saves) stageSave(txn, file);
+                await txn.commit();
+            } catch (batchErr) {
+                log(`[okcode] batch write of ${written} files failed (${batchErr.message}) — retrying file by file`);
+                written = 0;
+                const one = async (rel, stage) => {
+                    try {
+                        const txn = env.transaction();
+                        stage(txn);
+                        await txn.commit();
+                        written++;
+                    } catch (err) {
+                        const error = String((err && err.message) || err).slice(0, 300);
+                        log(`[okcode] ${rel}: not written to the store — ${error}`);
+                        failed.push({ rel, error });
+                    }
+                };
+                for (const rel of removals) await one(rel, (txn) => stageRemoval(txn, rel));
+                for (const file of saves) await one(file.rel, (txn) => stageSave(txn, file));
             }
-            await txn.commit();
             // FTS indexing is asynchronous — a search issued straight after a
             // write can miss it. Waiting for BOTH indexes here is what makes
             // find() read its own writes — where this process drains them.
@@ -542,6 +595,7 @@ async function openStore({ db, id, access, profiles = [], log = () => {} } = {})
                 if (fts) await db.fts.flush(SYMBOLS, env).catch(() => {});
                 if (contentFts) await db.fts.flush(FILES, env).catch(() => {});
             }
+            return { written, failed };
         },
 
         // The dependency surface. Separate from files and symbols because it

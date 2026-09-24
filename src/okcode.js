@@ -424,6 +424,11 @@ async function open({
         try {
             const live = db.embeddings.indexer(scoped);
             if (live) return await live.stats();
+            // The durable stats read the pipeline's vector sub-env, open here
+            // only if it existed when this process booted (or was touched
+            // since) — else every doc reads as pending. Open it first.
+            const sep = scoped.indexOf(':');
+            if (sep > 0) await db.embeddings._ensureTypeEnv?.(scoped.slice(0, sep), FILES).catch(() => {});
             return db.embeddings._durableIndexerStats ? db.embeddings._durableIndexerStats(scoped) : null;
         } catch (err) {
             return { error: err.message };
@@ -440,7 +445,7 @@ async function open({
         }
     }
 
-    function embedderEntry(p, { pipeline = null, dims = null, stats = null, error = null } = {}) {
+    function embedderEntry(p, { pipeline = null, dims = null, stats = null, error = null, waiting = null } = {}) {
         const counts = (stats && stats.doc_counts) || {};
         const space = emb.describe(p.record, dims || null);
         const e = {
@@ -463,6 +468,11 @@ async function open({
         } else if (error || (stats && stats.error)) {
             e.state = 'error';
             e.error = error || stats.error;
+        } else if (waiting) {
+            // A process without engines, before any indexing process created
+            // the pipeline: not an error — it attaches on a later ask/status.
+            e.state = 'pending';
+            e.reason = waiting;
         } else if (!pipeline) {
             e.state = 'absent';
         } else {
@@ -517,6 +527,10 @@ async function open({
             }
             if (sp && sp.error) {
                 out.embedders.push(embedderEntry(p, { error: sp.error }));
+                continue;
+            }
+            if (sp && sp.pending) {
+                out.embedders.push(embedderEntry(p, { dims: sp.dims, waiting: sp.pending }));
                 continue;
             }
             const found = await pipelineFor(env, p);
@@ -648,7 +662,13 @@ async function open({
         const results = [];
         for (const [id, o] of opened) {
             const st = await o.store.addProfile(entry.profile);
-            results.push({ id, pipeline: st.pipeline, dims: st.dims, error: st.error || null });
+            results.push({
+                id,
+                pipeline: st.pipeline,
+                dims: st.dims,
+                error: st.error || null,
+                pending: st.pending || null,
+            });
         }
         for (const o of opened.values()) await learnDims(o.store);
         return { name, workspaces: results };

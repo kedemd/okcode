@@ -15,17 +15,35 @@ const DEFAULT_SKIP = ['node_modules', '.git', '.idea', 'dist', 'build', 'coverag
 const sha1 = (buf) => crypto.createHash('sha1').update(buf).digest('hex').toUpperCase();
 
 // Workspace-relative, `/`-separated, never escaping the root. The check is
-// lexical: `..` segments, absolute paths (POSIX or drive-letter/UNC) and NUL are
-// refused outright rather than normalised away. Backslash is treated as a
-// separator for the `..` test only, so `a\..\..\x` cannot escape on Windows.
+// lexical — `..` segments, absolute paths and NUL are refused outright rather
+// than normalised away — and it depends on the DIALECT of the filesystem the
+// facade reaches, because what "absolute" and "separator" mean does:
+//
+//   posix    `/` is the only separator. Backslash and `:` are ordinary
+//            filename characters, so `d:\test\x.html` is a (strange but valid)
+//            RELATIVE name — one such file on disk must be addressable, never
+//            a reason to refuse the workspace. Refused: leading `/`, a `..`
+//            segment, NUL.
+//   windows  Backslash is a separator too (so `a\..\..\x` cannot escape), and
+//            drive-letter (`C:`), rooted (`\x`) and UNC (`\\host`) forms are
+//            absolute. Refused: those, a `..` segment on either separator, NUL.
+//
 // Returns the cleaned path (empty and `.` segments dropped).
-function checkPath(p) {
+const DIALECT_RULES = {
+    posix: { absolute: (p) => p.startsWith('/'), segments: (p) => p.split('/') },
+    windows: {
+        absolute: (p) => p.startsWith('/') || p.startsWith('\\') || /^[A-Za-z]:/.test(p),
+        segments: (p) => p.split(/[\\/]/),
+    },
+};
+
+function checkPath(p, dialect = 'posix') {
+    const rules = DIALECT_RULES[dialect];
+    if (!rules) throw new Error(`unknown path dialect: ${dialect}`);
     if (typeof p !== 'string' || p === '') throw new Error(`invalid workspace path: ${JSON.stringify(p)}`);
     if (p.includes('\0')) throw new Error(`invalid workspace path (NUL): ${JSON.stringify(p)}`);
-    if (p.startsWith('/') || p.startsWith('\\') || /^[A-Za-z]:/.test(p)) {
-        throw new Error(`workspace path must be relative: ${JSON.stringify(p)}`);
-    }
-    if (p.split(/[\\/]/).includes('..')) throw new Error(`workspace path escapes the root: ${JSON.stringify(p)}`);
+    if (rules.absolute(p)) throw new Error(`workspace path must be relative: ${JSON.stringify(p)}`);
+    if (rules.segments(p).includes('..')) throw new Error(`workspace path escapes the root: ${JSON.stringify(p)}`);
     const clean = p
         .split('/')
         .filter((s) => s !== '' && s !== '.')
@@ -33,6 +51,11 @@ function checkPath(p) {
     if (!clean) throw new Error(`invalid workspace path: ${JSON.stringify(p)}`);
     return clean;
 }
+
+// The same check bound to one dialect — what a facade exposes as its own
+// `checkPath`, so a caller (the workspace scan) can ask "can this facade
+// address that name?" before sending it anywhere.
+const pathChecker = (dialect) => (p) => checkPath(p, dialect);
 
 // mtime as a Number: whole seconds plus the 9-digit nanosecond fraction,
 // formatted as a decimal string then parsed — the same path the bash dialect's
@@ -126,4 +149,4 @@ async function acquireLock({ commit, read, remove, liveness, self }, lockPath, i
 
 const selfIdentity = () => ({ pid: process.pid, host: os.hostname(), startTime: procStartTime(process.pid) });
 
-module.exports = { DEFAULT_SKIP, sha1, checkPath, mtimeOf, procStartTime, acquireLock, selfIdentity };
+module.exports = { DEFAULT_SKIP, sha1, checkPath, pathChecker, mtimeOf, procStartTime, acquireLock, selfIdentity };

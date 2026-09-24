@@ -8,7 +8,7 @@ const path = require('path');
 const crypto = require('crypto');
 const os = require('os');
 const { exec: cpExec } = require('child_process');
-const { DEFAULT_SKIP, sha1, checkPath, mtimeOf, procStartTime, acquireLock, selfIdentity } = require('./common');
+const { DEFAULT_SKIP, sha1, pathChecker, mtimeOf, procStartTime, acquireLock, selfIdentity } = require('./common');
 
 const tmpName = () => `.okcode-tmp-${process.pid}-${crypto.randomBytes(6).toString('hex')}`;
 
@@ -23,6 +23,10 @@ async function unlinkQuiet(p) {
 function localFs(root) {
     if (typeof root !== 'string' || !root) throw new Error('localFs(root): root is required');
     const base = path.resolve(root);
+    // The names this facade can address follow THIS machine's filesystem: on
+    // Linux/macOS a backslash is an ordinary filename character.
+    const dialect = process.platform === 'win32' ? 'windows' : 'posix';
+    const checkPath = pathChecker(dialect);
     const abs = (rel) => path.join(base, ...checkPath(rel).split('/'));
 
     async function list({ skip = DEFAULT_SKIP } = {}) {
@@ -232,7 +236,7 @@ function localFs(root) {
         });
     }
 
-    return { kind: 'localFs', root: base, list, stat, read, commit, lock, remove, exec };
+    return { kind: 'localFs', dialect, root: base, checkPath, list, stat, read, commit, lock, remove, exec };
 }
 
 module.exports = { localFs };

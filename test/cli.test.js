@@ -131,6 +131,18 @@ describe('cli', () => {
         assert.doesNotMatch(g.stdout, /lib\/factory\.js:/);
         const gj = JSON.parse(run(['grep', 'add', '--path', 'lib', '--max-per-file', '1', '--json']).stdout);
         assert.deepEqual([gj.matches.length, gj.files[0].count], [1, 5]);
+        const gm = run(['grep', 'ad+', '--regex', '--path', 'lib', '--output', 'matches']);
+        assert.equal(gm.code, 0, gm.stderr);
+        assert.match(gm.stdout, /distinct match/);
+        assert.match(gm.stdout, /\n {2}\d+ {2}add {2}\(/);
+        const gp = JSON.parse(run(['grep', 'add', '--path', 'lib', '--max', '1', '--page', '2', '--json']).stdout);
+        assert.deepEqual([gp.page, gp.matches.length, gp.offset], [2, 1, 1]);
+        assert.deepEqual(
+            JSON.parse(run(['grep', 'add', '--path', 'lib', '--output', 'files', '--json']).stdout).files.map(
+                (f) => f.file,
+            ),
+            gj.counts.map((f) => f.file),
+        );
         assert.match(run(['glob', 'lib/*.js,!lib/unicode.js']).stdout, /2 files:\n {2}lib\/factory\.js/);
         assert.deepEqual(JSON.parse(run(['glob', '*.mjs', '--json']).stdout).files.map((f) => f.file), ['lib/esm.mjs']);
         const o = run(['outline', 'lib/factory.js']);

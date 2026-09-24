@@ -66,7 +66,7 @@ const HELP = {
         'okcode structure [--dir sub/]\n  Directories by symbol count, total lines, and the largest top-level symbols.',
     find: 'okcode find <query> [--kind function|class|method|const|…] [--limit N]\n  Definitions by name, doc prose and file content.',
     refs: 'okcode refs <query> [--limit N]\n  Every textual use, attributed to the symbol containing it.',
-    grep: 'okcode grep <pattern> [--regex] [--case-sensitive | --smart-case] [--glob G[,G…]] [--path DIR[,…]]\n            [--context N] [--max N] [--max-per-file N] [--limit FILES]\n  Every matching line as file:line: text, grouped by file (rg-style). Literal and\n  case-insensitive by default; --glob takes rg globs ("!x" excludes), repeatable.',
+    grep: 'okcode grep <pattern> [--regex] [--case-sensitive | --smart-case] [--glob G[,G…]] [--path DIR[,…]]\n            [--context N] [--max N] [--max-per-file N] [--limit FILES]\n            [--output lines|files|matches] [--page N] [--offset N]\n  Every matching line as file:line: text, grouped by file (rg-style); --output files\n  counts per file (rg -c), --output matches lists distinct matched strings (rg -o | uniq -c). Literal and\n  case-insensitive by default; --glob takes rg globs ("!x" excludes), repeatable.',
     glob: 'okcode glob <pattern>[,<pattern>…] [--limit N]\n  Workspace files whose paths match (rg globs; "!x" excludes). Reads no file.',
     outline:
         'okcode outline <file> [--limit N]\n  The file in named pieces (symbols, regions or chunks) with line ranges and at=.',
@@ -606,6 +606,9 @@ const WS_COMMANDS = {
             max_matches: flags.max,
             max_per_file: flags['max-per-file'],
             limit: flags.limit,
+            output: flags.output,
+            page: flags.page,
+            offset: flags.offset,
         };
         return lookupVia(ws, 'code_grep', args, () =>
             ws.grep(pattern, {
@@ -619,6 +622,9 @@ const WS_COMMANDS = {
                 maxMatches: flags.max,
                 maxPerFile: flags['max-per-file'],
                 maxFiles: flags.limit,
+                output: flags.output,
+                page: flags.page,
+                offset: flags.offset,
             }),
         );
     },

@@ -282,6 +282,11 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
     // Files the store refused to write (rel → error): a scan error, reported
     // by structure() until a later write of the same file succeeds.
     const storeErrors = new Map();
+    // Files the last tree walk found but could not take in (rel → reason): a
+    // name the facade cannot address, or a file whose own read failed. One odd
+    // file costs itself alone — never the workspace — and is reported here
+    // (stats().skipped, structure().skipped) until a later walk takes it in.
+    const scanWarnings = new Map();
 
     // ── ingest ──────────────────────────────────────────────────────────
 
@@ -327,17 +332,38 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
         return true;
     }
 
-    // Read many files through the facade in bounded batches.
-    async function readMany(rels, sizeOf = () => 0) {
+    // Read many files through the facade in bounded batches. With `onFileError`
+    // (the tree walk), a batch the facade refuses is retried file by file so
+    // one bad name costs only itself: each file that still throws is reported
+    // to onFileError and skipped. If EVERY file of the batch fails on its own
+    // too, the failure is not about a file (a transport outage) and it throws.
+    async function readMany(rels, sizeOf = () => 0, { onFileError = null } = {}) {
         const out = new Map();
         let batch = [];
         let bytes = 0;
         const go = async () => {
             if (!batch.length) return;
-            const got = await access.read(batch);
-            for (const [p, buf] of got) out.set(p, buf);
+            const cur = batch;
             batch = [];
             bytes = 0;
+            let got;
+            try {
+                got = await access.read(cur);
+            } catch (err) {
+                if (!onFileError) throw err;
+                got = new Map();
+                const failed = [];
+                for (const rel of cur) {
+                    try {
+                        for (const [p, buf] of await access.read([rel])) got.set(p, buf);
+                    } catch (e) {
+                        failed.push([rel, e]);
+                    }
+                }
+                if (failed.length === cur.length) throw err;
+                for (const [rel, e] of failed) onFileError(rel, e);
+            }
+            for (const [p, buf] of got) out.set(p, buf);
         };
         for (const rel of rels) {
             batch.push(rel);
@@ -593,8 +619,28 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
         // friends). The shipped facades already prune them; a custom facade
         // may not. .gitignore is the second filter, for a working-state
         // directory with no leading dot.
+        scanWarnings.clear();
+        const warn = (rel, err) => scanWarnings.set(rel, String((err && err.message) || err).slice(0, 300));
+        // A name the facade itself cannot address (its own dialect's path
+        // rules: a Windows facade listing a name it would refuse) is skipped
+        // with a warning here, before it can reach a batched stat or read
+        // and fail every other file with it.
+        const addressable = (rel) => {
+            if (typeof access.checkPath !== 'function') return true;
+            try {
+                access.checkPath(rel);
+                return true;
+            } catch (err) {
+                warn(rel, err);
+                return false;
+            }
+        };
         const rows = listed.filter(
-            (r) => !/(^|\/)\.[^/]+\//.test(r.path) && !OWN_TRANSIENT.test(r.path) && !gitignored(r.path),
+            (r) =>
+                !/(^|\/)\.[^/]+\//.test(r.path) &&
+                !OWN_TRANSIENT.test(r.path) &&
+                !gitignored(r.path) &&
+                addressable(r.path),
         );
         const seen = new Set();
         const needHash = [];
@@ -672,6 +718,7 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
         const bodies = await readMany(
             toRead.map((r) => r.path),
             (p) => sizes.get(p),
+            { onFileError: warn },
         );
         for (const row of toRead) {
             const buf = bodies.get(row.path);
@@ -687,7 +734,13 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
             if (drop(key)) removed++;
         }
         lastScanAt = Date.now();
-        return { scanned: rows.length, reparsed: opaque.length + toRead.length, removed, pendingWrites: pending.size };
+        return {
+            scanned: rows.length,
+            reparsed: opaque.length + toRead.length,
+            removed,
+            pendingWrites: pending.size,
+            ...(scanWarnings.size ? { skipped: scanWarnings.size } : {}),
+        };
     }
 
     // Whether this workspace has run its open-time tree walk. Plain refresh()
@@ -1273,11 +1326,15 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
         scheduleFlush();
     }
 
+    const scanSkipped = () => [...scanWarnings].map(([file, reason]) => ({ file, reason }));
+
     const api = {
         id,
         access,
         store,
         refresh,
+        // Files the last tree walk found but could not take in, with why.
+        scanWarnings: scanSkipped,
         // The host-triggered sync point (DESIGN §6): rescan now. `force`
         // re-hashes everything instead of trusting (size, mtime).
         sync({ force = false } = {}) {
@@ -1328,6 +1385,8 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
                 // Files the store could not persist: indexed in memory, but a
                 // restart re-reads them rather than finding them warm.
                 unsaved: [...storeErrors].map(([file, error]) => ({ file, error })),
+                // Files the last walk found but skipped (see scanWarnings).
+                skipped: scanSkipped(),
                 largest,
             };
         },
@@ -2463,6 +2522,8 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
                 pendingWrites: pending.size,
                 // Files the store refused (see structure().unsaved).
                 unsaved: storeErrors.size,
+                // Files the last walk skipped (structure().skipped names them).
+                skipped: scanWarnings.size,
                 byLang,
             };
         },

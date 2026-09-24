@@ -31,7 +31,7 @@ const { paletteFrom } = require('./analysis/convention-color');
 const textUtil = require('./analysis/text');
 const { chunkCode } = require('./analysis/chunk');
 const { quoteLines, asQuery } = require('./store');
-const { compileMatcher, matchText, pathMatcher } = require('./grep');
+const { compileMatcher, matchText, tallyText, pathMatcher } = require('./grep');
 
 const DEFAULTS = {
     // A whole-file read is capped by LINES, not bytes: a truncated read must
@@ -1035,12 +1035,15 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
             return Number.isFinite(n) ? Math.max(lo, Math.min(hi, Math.floor(n))) : dflt;
         };
         const matcher = compileMatcher(pattern, { regex: !!o.regex, caseSensitive: o.caseSensitive ?? false });
+        const output = o.output === 'files' || o.output === 'matches' ? o.output : 'lines';
         const context = int(o.context, 0, 0, 50);
         const before = int(o.before, context, 0, 50);
         const after = int(o.after, context, 0, 50);
         const maxMatches = int(o.maxMatches, 200, 1, 100000);
         const maxPerFile = int(o.maxPerFile, 50, 1, 100000);
         const maxFiles = int(o.maxFiles, Infinity, 1, Infinity);
+        const offset = int(o.offset, 0, 0, Number.MAX_SAFE_INTEGER);
+        const page = int(o.page, 1, 1, Number.MAX_SAFE_INTEGER);
         const inPath = pathMatcher({ glob: o.glob, paths: o.paths });
 
         const ready = indexReady();
@@ -1051,54 +1054,166 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
             ready,
         );
 
+        // Every candidate is read to the end: the counts are exact whatever
+        // is shown. Only the lines of the requested page are materialized.
+        //
+        // The pager (lines): the matching lines of every file in path order
+        // form one stream, indexed from 0. A page starts at `offset` (page 1)
+        // or where the previous page stopped, and holds up to maxMatches
+        // shown lines from at most maxFiles files, at most maxPerFile per
+        // file — a file's lines past that cap are passed over on that page
+        // (its row says so), and the next file follows. Deterministic in the
+        // arguments, so page=N is stable; `next.offset` is the stream index
+        // page N+1 starts at.
+        const counts = []; // every matching file: { file, count, start, at }
+        const tally = output === 'matches' ? new Map() : null;
         const matches = [];
         const perFile = [];
-        let truncated = false;
-        let unsearched = 0;
+        let stream = 0;
+        let pg = 1;
+        let inPage = 0;
+        let filesInPage = 0;
+        let pageStart = null;
+        let pageEnd = null;
+        let begun = false;
         const B = Math.max(1, opts.readBatchFiles);
         for (let i = 0; i < rels.length; i += B) {
-            if (matches.length >= maxMatches || perFile.length >= maxFiles) {
-                truncated = true;
-                unsearched = rels.length - i;
-                break;
-            }
             const chunk = rels.slice(i, i + B);
             const texts = await grepTexts(chunk, ready);
-            for (let k = 0; k < chunk.length; k++) {
-                const rel = chunk[k];
+            for (const rel of chunk) {
                 const got = texts.get(rel);
                 if (!got) continue;
-                if (matches.length >= maxMatches || perFile.length >= maxFiles) {
-                    truncated = true;
-                    unsearched = rels.length - i - k;
-                    break;
+                const c = tally
+                    ? tallyText(got.text, matcher, tally, rel)
+                    : matchText(got.text, matcher, { maxPerFile: 0 }).count;
+                if (!c) continue;
+                const start = stream;
+                stream += c;
+                counts.push({ file: rel, count: c, start, at: got.at });
+                if (output !== 'lines') continue;
+                let k = Math.max(0, offset - start);
+                let shownInFile = 0;
+                let onPage = false;
+                let win = null;
+                while (k < c) {
+                    if (!begun) begun = true;
+                    else if (inPage >= maxMatches || (!onPage && filesInPage >= maxFiles)) {
+                        pg++;
+                        inPage = 0;
+                        filesInPage = 0;
+                        shownInFile = 0;
+                        onPage = false;
+                    }
+                    if (pg === page && pageStart === null) pageStart = start + k;
+                    if (pg > page) {
+                        if (pageEnd === null) pageEnd = start + k;
+                    }
+                    if (!onPage) {
+                        onPage = true;
+                        filesInPage++;
+                    }
+                    const room = Math.min(maxMatches - inPage, maxPerFile - shownInFile);
+                    const take = Math.min(room, c - k);
+                    if (pg === page) win = { skip: k, take, passed: 0 };
+                    inPage += take;
+                    shownInFile += take;
+                    k += take;
+                    // Past the per-file cap: the rest of this file is passed
+                    // over on this page. (A FULL page instead carries the
+                    // rest over to the next one.)
+                    if (shownInFile >= maxPerFile && k < c) {
+                        if (pg === page) win.passed = c - k;
+                        k = c;
+                    }
                 }
-                const room = Math.min(maxPerFile, maxMatches - matches.length);
-                const r = matchText(got.text, matcher, { before, after, maxPerFile: room });
-                if (!r.count) continue;
+                if (!win) continue;
+                const r = matchText(got.text, matcher, { before, after, skip: win.skip, maxPerFile: win.take });
                 for (const m of r.matches) matches.push({ file: rel, ...m });
-                perFile.push({ file: rel, count: r.count, shown: r.matches.length, at: got.at });
-                if (r.count > r.matches.length) truncated = true;
+                perFile.push({
+                    file: rel,
+                    count: c,
+                    shown: r.matches.length,
+                    at: got.at,
+                    ...(win.skip ? { from: win.skip } : {}),
+                    ...(win.passed ? { passed: win.passed } : {}),
+                });
             }
-            if (unsearched) break;
         }
-        return {
+        const totalLines = stream;
+        const base = {
             ok: true,
             id,
             pattern: matcher.source,
             regex: matcher.regex,
             ignoreCase: matcher.ignoreCase,
-            matches,
-            files: perFile,
+            output,
+        };
+        const tail = {
+            counts,
             searched: universe.length,
             candidates: rels.length,
             via,
             // false: answered before the index was ready (straight from the
             // facade's listing and reads).
             indexed: ready,
-            truncated,
-            ...(unsearched ? { unsearched } : {}),
             elapsedMs: Date.now() - t0,
+        };
+        if (output === 'files') {
+            const per = Number.isFinite(maxFiles) ? maxFiles : counts.length || 1;
+            const from = offset + (page - 1) * per;
+            const rows = counts.slice(from, from + per);
+            const end = from + rows.length;
+            return {
+                ...base,
+                matches: [],
+                files: rows.map((f) => ({ file: f.file, count: f.count, shown: 0, at: f.at })),
+                total: { lines: totalLines, files: counts.length },
+                page,
+                pages: Math.ceil(Math.max(0, counts.length - offset) / per),
+                offset: from,
+                next: end < counts.length ? { page: page + 1, offset: end } : null,
+                truncated: rows.length < counts.length,
+                ...tail,
+            };
+        }
+        if (output === 'matches') {
+            const all = [...tally.entries()]
+                .map(([text, t]) => ({ text, count: t.count, lines: t.lines, files: t.files, first: t.first }))
+                .sort((x, y) => y.count - x.count || (x.text < y.text ? -1 : x.text > y.text ? 1 : 0));
+            const from = offset + (page - 1) * maxMatches;
+            const rows = all.slice(from, from + maxMatches);
+            const end = from + rows.length;
+            return {
+                ...base,
+                matches: [],
+                distinct: rows,
+                files: [],
+                total: {
+                    lines: totalLines,
+                    files: counts.length,
+                    distinct: all.length,
+                    occurrences: all.reduce((n, d) => n + d.count, 0),
+                },
+                page,
+                pages: Math.ceil(Math.max(0, all.length - offset) / maxMatches),
+                offset: from,
+                next: end < all.length ? { page: page + 1, offset: end } : null,
+                truncated: rows.length < all.length,
+                ...tail,
+            };
+        }
+        const shown = matches.length;
+        return {
+            ...base,
+            matches,
+            files: perFile,
+            total: { lines: totalLines, files: counts.length },
+            page,
+            pages: begun ? pg : 0,
+            offset: pageStart === null ? Math.max(offset, totalLines) : pageStart,
+            next: pageEnd === null ? null : { page: page + 1, offset: pageEnd },
+            truncated: shown < totalLines,
+            ...tail,
         };
     }
 
@@ -2131,12 +2246,18 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
         //       paths,                  // ['src', 'lib/x.js'] — dirs or files
         //       context = 0, before, after,   // lines around each match
         //       maxMatches = 200, maxPerFile = 50, maxFiles = ∞,
-        //   }) → { ok, matches: [{ file, line, col, text, before[], after[] }],
-        //          files: [{ file, count, shown, at }], searched, candidates,
-        //          via, indexed, truncated, unsearched?, elapsedMs }
+        //       output = 'lines',       // | 'files' (rg -c) | 'matches' (rg -o | uniq -c)
+        //       page = 1, offset = 0,   // see the pager in grepAll
+        //   }) → { ok, output, matches: [{ file, line, col, text, before[], after[], n }],
+        //          files: [{ file, count, shown, at, from?, passed? }],
+        //          distinct?: [{ text, count, lines, files, first }],
+        //          total: { lines, files, distinct?, occurrences? },
+        //          counts: [{ file, count, start, at }], page, pages, offset,
+        //          next: { page, offset } | null, searched, candidates,
+        //          via, indexed, truncated, elapsedMs }
         //
-        // Files in path order; `count` keeps counting past maxPerFile, and
-        // `truncated` says some matching line was not returned. `via` names
+        // Files in path order; counts are exact whatever the caps (every
+        // candidate is read), and `truncated` says something was not shown. `via` names
         // what chose the files that were read: 'target' (the facade grepped
         // where the files live), 'index' (full-text pre-filter), 'scan'
         // (every file, from the index's records) or 'direct' (every file,

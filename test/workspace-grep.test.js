@@ -14,7 +14,7 @@ const { openWorkspace } = require('../src/workspace');
 const { openStore } = require('../src/store');
 const { localFs, shell } = require('../src/access');
 const { createTools } = require('../src/tools');
-const { globToRegExp, pathMatcher, compileMatcher, matchText, indexTerms } = require('../src/grep');
+const { globToRegExp, pathMatcher, compileMatcher, matchText, tallyText, indexTerms } = require('../src/grep');
 const { writeFixture, tmpRoot } = require('./fixtures/code-fixture');
 
 // Files on top of the shared fixture: several matches per file, a test file,
@@ -89,7 +89,24 @@ describe('grep helpers', () => {
         assert.throws(() => compileMatcher('(', { regex: true }), { code: 'GREP_BAD_PATTERN' });
         const r = matchText('x\nfoo\ny\nfoo\n', compileMatcher('foo'), { context: 1, maxPerFile: 1 });
         assert.equal(r.count, 2);
-        assert.deepEqual(r.matches, [{ line: 2, col: 1, text: 'foo', before: ['x'], after: ['y'] }]);
+        assert.deepEqual(r.matches, [{ line: 2, col: 1, text: 'foo', before: ['x'], after: ['y'], n: 0 }]);
+        const second = matchText('x\nfoo\ny\nfoo\n', compileMatcher('foo'), { skip: 1 });
+        assert.deepEqual(
+            second.matches.map((m) => [m.line, m.n]),
+            [[4, 1]],
+            'skip passes over the first matches, still counted',
+        );
+        assert.equal(second.count, 2);
+        const tally = new Map();
+        const m = compileMatcher('OKDB_[A-Z_]+', { regex: true, caseSensitive: true });
+        assert.equal(tallyText('a OKDB_X b OKDB_Y_Z\nnone\nOKDB_X OKDB_X\n', m, tally, 'f.js'), 2);
+        assert.deepEqual(
+            [...tally].map(([k, t]) => [k, t.count, t.lines, t.files]),
+            [
+                ['OKDB_X', 3, 2, 1],
+                ['OKDB_Y_Z', 1, 1, 1],
+            ],
+        );
         const last = matchText('a\nfoo\n', compileMatcher('foo'), { after: 3 });
         assert.deepEqual(last.matches[0].after, [], 'no phantom line after a trailing newline');
     });
@@ -259,13 +276,103 @@ for (const fac of FACADES) {
             const total = await ws.grep('hello', { maxMatches: 3 });
             assert.equal(total.matches.length, 3);
             assert.equal(total.truncated, true);
-            assert.ok(total.unsearched >= 1, JSON.stringify(total));
+            // Capped output, exact counts: every candidate is still read.
+            assert.deepEqual(total.total, { lines: 10, files: 4 });
+            assert.deepEqual(total.next, { page: 2, offset: 3 });
             const files = await ws.grep('hello', { maxFiles: 1 });
             assert.deepEqual(
                 files.files.map((f) => f.file),
                 ['docs/notes.md'],
             );
             assert.equal(files.truncated, true);
+        });
+
+        it('paging: pages concatenate to the whole answer; offset resumes; per-file cap passes over', async () => {
+            const { ws } = await setup();
+            const all = (await ws.grep('hello')).matches.map((m) => `${m.file}:${m.line}`);
+            const seen = [];
+            const starts = [];
+            let page = 1;
+            for (;;) {
+                const r = await ws.grep('hello', { maxMatches: 3, page });
+                assert.deepEqual(r.total, { lines: 10, files: 4 }, 'exact on every page');
+                assert.equal(r.pages, 4);
+                starts.push(r.offset);
+                seen.push(...r.matches.map((m) => `${m.file}:${m.line}`));
+                if (!r.next) break;
+                assert.equal(r.next.page, page + 1);
+                page = r.next.page;
+            }
+            assert.deepEqual(seen, all, 'no line lost or repeated across pages');
+            assert.deepEqual(starts, [0, 3, 6, 9]);
+            // A page that starts mid-file says where in the file it starts.
+            const p2 = await ws.grep('hello', { maxMatches: 3, page: 2 });
+            assert.deepEqual(
+                p2.files.map((f) => [f.file, f.count, f.shown, f.from]),
+                [['src/app.js', 6, 3, 2]],
+            );
+            // offset = a stream position: page 1 from 3 is page 2 from 0.
+            const fromOffset = await ws.grep('hello', { maxMatches: 3, offset: 3 });
+            assert.deepEqual(fromOffset.matches, p2.matches);
+            assert.equal(fromOffset.offset, 3);
+            // The per-file cap passes the rest of a file over (said on its
+            // row); the page goes on with the next file.
+            const capped = await ws.grep('hello', { maxMatches: 3, maxPerFile: 2 });
+            const app = capped.files.find((f) => f.file === 'src/app.js');
+            assert.deepEqual([app.count, app.shown, app.passed], [6, 2, 4]);
+            assert.deepEqual(capped.next, { page: 2, offset: 7 });
+            const cappedP2 = await ws.grep('hello', { maxMatches: 3, maxPerFile: 2, page: 2 });
+            assert.deepEqual(
+                cappedP2.matches.map((m) => `${m.file}:${m.line}`),
+                ['src/app.test.js:1', 'src/app.test.js:2', 'src/crlf.js:2'],
+            );
+            assert.equal(cappedP2.next, null);
+            const past = await ws.grep('hello', { maxMatches: 3, page: 9 });
+            assert.deepEqual([past.matches.length, past.pages, past.total.lines], [0, 4, 10]);
+        });
+
+        it("output: 'files' counts per file; 'matches' tallies distinct strings — exact, paged", async () => {
+            const { ws } = await setup();
+            const f = await ws.grep('hello', { output: 'files' });
+            assert.deepEqual(
+                f.files.map((x) => [x.file, x.count]),
+                [
+                    ['docs/notes.md', 1],
+                    ['src/app.js', 6],
+                    ['src/app.test.js', 2],
+                    ['src/crlf.js', 1],
+                ],
+            );
+            assert.equal(f.matches.length, 0);
+            assert.deepEqual(f.total, { lines: 10, files: 4 });
+            const f2 = await ws.grep('hello', { output: 'files', maxFiles: 3, page: 2 });
+            assert.deepEqual(
+                f2.files.map((x) => x.file),
+                ['src/crlf.js'],
+            );
+            assert.equal(f2.next, null);
+            const m = await ws.grep('hel+o\\w*', { output: 'matches', regex: true });
+            assert.deepEqual(
+                m.distinct.map((d) => [d.text, d.count, d.files]),
+                [
+                    ['hello', 6, 2],
+                    ['HELLO_ALL', 2, 1],
+                    ['Hello', 2, 2],
+                    ['helloCr', 1, 1],
+                ],
+            );
+            assert.equal(m.distinct.find((d) => d.text === 'helloCr').first, 'src/crlf.js');
+            assert.deepEqual(m.total, { lines: 10, files: 4, distinct: 4, occurrences: 11 });
+            const mp = await ws.grep('hel+o\\w*', { output: 'matches', regex: true, maxMatches: 3 });
+            assert.equal(mp.distinct.length, 3);
+            assert.deepEqual(mp.next, { page: 2, offset: 3 });
+            const mp2 = await ws.grep('hel+o\\w*', { output: 'matches', regex: true, maxMatches: 3, page: 2 });
+            assert.deepEqual(
+                mp2.distinct.map((d) => d.text),
+                ['helloCr'],
+            );
+            // Secrets stay withheld in every mode.
+            assert.ok(!m.distinct.some((d) => /TOKEN/i.test(d.text)));
         });
 
         it('literal pre-filters stay complete: a file edited outside the workspace is found', async () => {
@@ -388,9 +495,83 @@ for (const fac of FACADES) {
             const capped = await tools.render('code_grep', { pattern: 'hello', max_per_file: 1 });
             assert.match(capped, /6 matching lines, showing 1/);
             const globbed = await tools.render('code_glob', { pattern: 'lib/*.js,!lib/unicode.js' });
-            assert.match(globbed, /— 2 files:\n {2}lib\/factory\.js {2}\(13 lines\)\n {2}lib\/math\.js {2}\(17 lines\)/);
+            assert.match(
+                globbed,
+                /— 2 files:\n {2}lib\/factory\.js {2}\(13 lines\)\n {2}lib\/math\.js {2}\(17 lines\)/,
+            );
             assert.match(await tools.render('code_glob', { pattern: 'nothing/**' }), /no file in grep-\d+ matches/);
             assert.ok(tools.schemas().some((s) => s.name === 'code_glob'));
+        });
+
+        it('tools: code_grep output modes, an actionable continuation, and a size budget that cuts before the host does', async () => {
+            const { ws, write } = await setup();
+            const body = [];
+            for (let i = 1; i <= 60; i++)
+                body.push(`const OKDB_VAR_${String(i % 20).padStart(2, '0')} = process.env.X; // needle ${i}`);
+            write('src/many.js', `${body.join('\n')}\n`);
+            await ws.refresh({ sync: true });
+            const tools = createTools({ workspace: async () => ws, workspaces: () => [{ id: ws.id }] });
+            if (process.env.GREP_SHOW)
+                console.log(await tools.render('code_grep', { pattern: 'needle', max_matches: 5 }));
+
+            // matches: the enumeration in one call, exact.
+            const en = await tools.render('code_grep', { pattern: 'OKDB_[A-Z_0-9]+', regex: true, output: 'matches' });
+            assert.match(en, /— 20 distinct matches \(60 occurrences on 60 matching lines in 1 file;/);
+            assert.match(en, /\n {2}3 {2}OKDB_VAR_00 {2}\(src\/many\.js\)/);
+            assert.doesNotMatch(en, /more distinct/);
+            const enPaged = await tools.render('code_grep', {
+                pattern: 'OKDB_[A-Z_0-9]+',
+                regex: true,
+                output: 'matches',
+                max_matches: 15,
+            });
+            assert.match(enPaged, /\[5 more distinct match\(es\) not shown — .*continue with page=2\]/);
+            const enP2 = await tools.render('code_grep', {
+                pattern: 'OKDB_[A-Z_0-9]+',
+                regex: true,
+                output: 'matches',
+                max_matches: 15,
+                page: 2,
+            });
+            assert.match(enP2, /— page 2, from 15/);
+            assert.equal((enP2.match(/\n {2}3 {2}OKDB_VAR_/g) || []).length, 5);
+
+            // files: rg -c.
+            const files = await tools.render('code_grep', { pattern: 'hello', output: 'files' });
+            assert.match(files, /10 matching lines in 4 files/);
+            assert.match(files, /\n {2}src\/app\.js: 6\n/);
+
+            // lines, capped by count: exact totals and the way on.
+            const capped = await tools.render('code_grep', { pattern: 'needle', max_matches: 5 });
+            assert.match(capped, /— 60 matching lines in 1 file/);
+            assert.match(
+                capped,
+                /\[55 more matching line\(s\) in 1 file\(s\) not shown — narrow with glob\/paths, use output:'files' or output:'matches' for the whole picture in one answer, or continue with page=2\]/,
+            );
+            // The per-file cap names its own remedy.
+            const perFile = await tools.render('code_grep', { pattern: 'needle' });
+            assert.match(
+                perFile,
+                /60 matching lines, showing 10 — raise max_per_file for the rest \(with paths:\["src\/many\.js"\]/,
+            );
+            assert.match(perFile, /\[50 matching line\(s\) passed over by max_per_file/);
+
+            // Capped by SIZE: whole lines only, the continuation inside the
+            // budget, and offset= resumes exactly at the first line not shown.
+            const big = { pattern: 'needle', max_per_file: 100, max_chars: 1500 };
+            const cut = await tools.render('code_grep', big);
+            assert.ok(cut.length <= 1500, `${cut.length} chars`);
+            const off = Number(/continue with offset=(\d+)\]/.exec(cut)[1]);
+            const lastShown = Number(/needle (\d+)\n(?![\s\S]*needle \d+\n)/.exec(cut)[1]);
+            assert.equal(off, lastShown, 'the stream index of the next line = lines shown so far');
+            const rest = await tools.render('code_grep', { ...big, offset: off });
+            assert.match(rest, new RegExp(`src/many\\.js:${off + 1}: .*needle ${off + 1}\\n`));
+            assert.match(rest, /showing \d+ \(matches \d+-\d+\)/);
+
+            assert.match(await tools.render('code_grep', { pattern: 'x', output: 'bogus' }), /output must be one of/);
+            const schema = tools.schemas().find((x) => x.name === 'code_grep');
+            const props = JSON.stringify(schema);
+            for (const k of ['"output"', '"page"', '"offset"', 'ENUMERATE']) assert.ok(props.includes(k), k);
         });
     });
 }

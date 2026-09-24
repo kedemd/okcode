@@ -200,3 +200,32 @@ test('a throwing analyser marks the file unparsed, not invisible, and never brea
         registerReal();
     }
 });
+
+// A symbol name is an indexed field, and okdb (≥ 2.3.2) aborts a write whose
+// indexed value is not a scalar — so whatever the analyser reports as a
+// component's name leaves this adapter as a string, and a nameless one is
+// dropped rather than indexed as "".
+test('component names from the analyser are always strings', () => {
+    const range = { start: 0, end: 10, loc: { start: { line: 1 }, end: { line: 2 } } };
+    const analyze = okjs.makeAnalyze(() => ({
+        analyzeOKSource: () => ({
+            symbols: [
+                { kind: 'component', name: 'x-card', range },
+                { kind: 'component', name: /x-rx/, range },
+                { kind: 'component', name: 42, range },
+                { kind: 'component', name: null, range },
+            ],
+            dependencies: [],
+        }),
+    }));
+    const r = analyze({ path: 'c.ok.js', source: '' });
+    assert.equal(r.parsed, true);
+    assert.deepEqual(
+        r.symbols.map((s) => [s.name, s.path]),
+        [
+            ['x-card', 'x-card'],
+            ['/x-rx/', '/x-rx/'],
+            ['42', '42'],
+        ],
+    );
+});

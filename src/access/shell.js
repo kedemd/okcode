@@ -149,6 +149,7 @@ const DIALECTS = {
             commit: ['_root', '_helpers', 'commit'],
             liveness: ['_root', 'liveness'],
             exec: ['_root', 'exec'],
+            grep: ['_root', 'grep'],
         }),
         frame: (fields, tail) => fields.map((f) => `${f}\0`).join('') + (tail ?? ''),
         // sha1sum prints lowercase; the scripts compare against these fields.
@@ -391,7 +392,43 @@ function shell({ root, run, dialect = 'bash' } = {}) {
         return { ok: false, out: stdout + dec(acc.ERR) };
     }
 
-    return { kind: 'shell', dialect, root, checkPath, list, stat, read, commit, lock, remove, exec };
+    // OPTIONAL PRE-FILTER (docs/ACCESS.md): which of `paths` contain the
+    // literal `text`, decided ON THE TARGET so only the files that match ever
+    // cross the transport. A Set of paths, or null when the target cannot
+    // answer (no usable grep, a dialect without the script, an answer that
+    // does not parse) — null means "read them all", never "none match".
+    async function filesContaining(paths, text, { ignoreCase = false } = {}) {
+        const t = String(text ?? '');
+        if (!d.scripts.grep || !t || /[\0\n]/.test(t)) return null;
+        if (ignoreCase && !/^[\x00-\x7f]*$/.test(t)) return null; // C-locale -i folds ASCII only
+        const clean = paths.map(checkPath);
+        if (!clean.length) return new Set();
+        const byClean = new Map(clean.map((c, i) => [c, paths[i]]));
+        let raw;
+        try {
+            raw = String(await call('grep', [ignoreCase ? 'i' : '-', t, ...clean]));
+        } catch {
+            return null;
+        }
+        const at = raw.indexOf('@OK\n');
+        if (at < 0 || raw.slice(0, at).trim()) return null;
+        const names = Buffer.from(raw.slice(at + 4).replace(/\s+/g, ''), 'base64')
+            .toString('utf8')
+            .split('\0')
+            .filter(Boolean);
+        const out = new Set();
+        for (const n of names) {
+            // Every name must be one we asked about: anything else means the
+            // output was not the NUL-separated list it should be, and a
+            // mis-parsed answer must never shrink the set.
+            const p = byClean.get(n.replace(/^\.\//, ''));
+            if (p === undefined) return null;
+            out.add(p);
+        }
+        return out;
+    }
+
+    return { kind: 'shell', dialect, root, checkPath, list, stat, read, commit, lock, remove, exec, filesContaining };
 }
 
 shell.quote = quote;

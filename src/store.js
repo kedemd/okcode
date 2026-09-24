@@ -27,6 +27,7 @@
 const crypto = require('crypto');
 const chunk = require('./analysis/chunk');
 const identity = require('./identity');
+const { indexTerms } = require('./grep');
 
 const FILES = 'files';
 const SYMBOLS = 'symbols';
@@ -638,6 +639,33 @@ async function openStore({ db, id, access, profiles = [], log = () => {} } = {})
                 return [...env.ftsQuery(FILES, FTS_NAME, String(query), {}, { limit, mode })]
                     .filter((h) => h && h.value)
                     .map((h) => ({ file: h.key, hash: h.value.hash, lang: h.value.lang, relevance: h.score || 0 }));
+            } catch {
+                return null;
+            }
+        },
+
+        // grep's ACCELERATOR, never its gate: the rels of every file the
+        // content index says holds all of `literal`'s indexable terms
+        // (src/grep.js indexTerms — terms chosen so that a file containing
+        // the literal cannot be missing one). null whenever that promise
+        // cannot be kept: no terms, no content index, or an index that has
+        // not caught up with the files type — the caller then scans. Keys
+        // only; no resolved content is fetched.
+        contentCandidates(literal) {
+            if (!contentFts) return null;
+            const terms = indexTerms(literal, { stopwords: STOPWORDS });
+            if (!terms.length) return null;
+            try {
+                const meta = (db.fts.list(FILES, env) || []).find((x) => x && x.name === FTS_NAME);
+                if (!meta || meta.status !== 'ready' || meta.lag !== 0) return null;
+                const keys = db.fts.search(
+                    FILES,
+                    FTS_NAME,
+                    terms.join(' '),
+                    { limit: Number.MAX_SAFE_INTEGER, mode: 'and', prefix: true },
+                    env,
+                );
+                return new Set(keys || []);
             } catch {
                 return null;
             }

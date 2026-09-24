@@ -496,6 +496,12 @@ async function open({
             embedders: [],
             orphaned: [],
         };
+        // Files the open workspace's last walk skipped (an odd name, an
+        // unreadable file) — each named with why; never a failed workspace.
+        if (o && typeof o.ws.scanWarnings === 'function') {
+            const skipped = o.ws.scanWarnings();
+            if (skipped.length) out.warnings = skipped.map((w) => ({ kind: 'scan-skipped', ...w }));
+        }
         if (!env) {
             out.missing = true;
             return out;

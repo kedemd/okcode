@@ -113,11 +113,13 @@ function isSecret(path) {
 }
 
 // Is this worth carrying the bytes of? Text we can search; everything else
-// gets a file node and nothing more.
+// gets a file node and nothing more. Always a boolean: the workspace compares
+// it with `!==` against a row's stored `indexed` flag, and an `undefined` (or a
+// LANGS string) there made every opaque file look re-stale on every sync.
 function isTextual(path, size) {
     if (isSecret(path)) return false;
     const e = extOf(path);
-    return (JS.has(e) || TEXT.has(e) || LANGS[e]) && (!size || size <= TEXT_MAX);
+    return !!(JS.has(e) || TEXT.has(e) || LANGS[e]) && (!size || size <= TEXT_MAX);
 }
 
 // The leading block/line comment above a declaration. This codebase explains

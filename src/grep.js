@@ -162,7 +162,22 @@ function compileMatcher(pattern, { regex = false, caseSensitive = false } = {}) 
             : literal !== null && /^[\x00-\x7f]*$/.test(literal)
               ? (line) => (/^[\x00-\x7f]*$/.test(line) ? line.toLowerCase().indexOf(lower) : searchRe(re, line))
               : (line) => searchRe(re, line);
-    return { test, literal, ignoreCase, regex: literal === null, source: p };
+    // Every non-empty matched string of a line, left to right (rg -o).
+    const g = new RegExp(re.source, `${re.flags}g`);
+    const all = (line) => {
+        const out = [];
+        g.lastIndex = 0;
+        let m;
+        while ((m = g.exec(line)) !== null) {
+            if (m[0] === '') {
+                g.lastIndex++;
+                continue;
+            }
+            out.push(m[0]);
+        }
+        return out;
+    };
+    return { test, all, literal, ignoreCase, regex: literal === null, source: p };
 }
 
 function searchRe(re, line) {
@@ -180,9 +195,16 @@ function clip(line, col = 0) {
 }
 
 // Every matching line of one text, with context. Returns
-// { matches: [{ line, col, text, before, after }], count } where `count` is
-// the number of matching lines (it keeps counting past `maxPerFile`).
-function matchText(text, matcher, { context = 0, before = context, after = context, maxPerFile = Infinity } = {}) {
+// { matches: [{ line, col, text, before, after, n }], count } where `count` is
+// the number of matching lines (it keeps counting past `maxPerFile`) and `n`
+// a match's 0-based ordinal among them. `skip` passes over the first matches
+// (counted, not returned) — a page that starts mid-file. `maxPerFile: 0`
+// only counts.
+function matchText(
+    text,
+    matcher,
+    { context = 0, before = context, after = context, maxPerFile = Infinity, skip = 0 } = {},
+) {
     const lines = String(text).split('\n');
     // A trailing newline ends the last line; it does not start another.
     if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
@@ -193,15 +215,49 @@ function matchText(text, matcher, { context = 0, before = context, after = conte
         const line = strip(lines[i]);
         const col = matcher.test(line);
         if (col < 0) continue;
-        count++;
-        if (out.length >= maxPerFile) continue;
+        const n = count++;
+        if (n < skip || out.length >= maxPerFile) continue;
         const b = [];
         for (let j = Math.max(0, i - before); j < i; j++) b.push(clip(strip(lines[j])));
         const a = [];
         for (let j = i + 1; j <= Math.min(lines.length - 1, i + after); j++) a.push(clip(strip(lines[j])));
-        out.push({ line: i + 1, col: col + 1, text: clip(line, col), before: b, after: a });
+        out.push({ line: i + 1, col: col + 1, text: clip(line, col), before: b, after: a, n });
     }
     return { matches: out, count };
+}
+
+// rg -o | sort | uniq -c over one text: adds every matched string to `tally`
+// (Map<string, { count, lines, files, first }>) and returns the number of
+// matching lines. `file` names the text, for the per-string file count.
+function tallyText(text, matcher, tally, file = null) {
+    const lines = String(text).split('\n');
+    if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
+    let count = 0;
+    for (let raw of lines) {
+        if (raw.endsWith('\r')) raw = raw.slice(0, -1);
+        if (matcher.test(raw) < 0) continue;
+        const found = matcher.all(raw);
+        if (!found.length) continue;
+        count++;
+        const seenOnLine = new Set();
+        for (const m of found) {
+            let t = tally.get(m);
+            if (!t) {
+                t = { count: 0, lines: 0, files: 0, first: file, lastFile: null };
+                tally.set(m, t);
+            }
+            t.count++;
+            if (!seenOnLine.has(m)) {
+                seenOnLine.add(m);
+                t.lines++;
+            }
+            if (t.lastFile !== file) {
+                t.lastFile = file;
+                t.files++;
+            }
+        }
+    }
+    return count;
 }
 
 // ── index pre-filter rules ──────────────────────────────────────────────
@@ -259,4 +315,4 @@ function splitList(v) {
     return clean.length ? clean : null;
 }
 
-module.exports = { globToRegExp, pathMatcher, compileMatcher, matchText, indexTerms, splitList, clip };
+module.exports = { globToRegExp, pathMatcher, compileMatcher, matchText, tallyText, indexTerms, splitList, clip };

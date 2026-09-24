@@ -259,7 +259,11 @@ function renderReceipt(verb, res) {
     return lines.join('\n');
 }
 
-function createTools({ workspace, workspaces = () => [] } = {}) {
+// `grepMaxChars`: the size code_grep keeps its answer under (the `max_chars`
+// argument overrides it per call). A host that clips tool output clips the
+// END — the continuation line — so the renderer stops first, at a line
+// boundary, and says exactly where to resume.
+function createTools({ workspace, workspaces = () => [], grepMaxChars = 12000 } = {}) {
     if (typeof workspace !== 'function') throw new Error('createTools needs workspace: async (hint) => ws | null');
 
     const known = () => {
@@ -444,36 +448,50 @@ function createTools({ workspace, workspaces = () => [] } = {}) {
 
     // rg-style: `file:line: text` for a match and `file-line- text` for
     // context (the address is copyable as-is into code_read), grouped under
-    // one heading per file, `--` between separated stretches.
+    // one heading per file, `--` between separated stretches. Returns the
+    // heading and the rows, each hit row carrying its match ordinal `n`, so a
+    // caller cutting for size knows where the cut fell.
     function renderGrepFile(fileRow, ms, withContext) {
         const rows = new Map();
         for (const m of ms) {
             m.before.forEach((t, j) => {
-                const n = m.line - m.before.length + j;
-                if (!rows.has(n)) rows.set(n, { text: t, hit: false });
+                const k = m.line - m.before.length + j;
+                if (!rows.has(k)) rows.set(k, { text: t, hit: false, n: m.n });
             });
-            rows.set(m.line, { text: m.text, hit: true });
+            rows.set(m.line, { text: m.text, hit: true, n: m.n });
             m.after.forEach((t, j) => {
-                const n = m.line + 1 + j;
-                if (!rows.has(n)) rows.set(n, { text: t, hit: false });
+                const k = m.line + 1 + j;
+                if (!rows.has(k)) rows.set(k, { text: t, hit: false, n: null });
             });
         }
         const nums = [...rows.keys()].sort((x, y) => x - y);
         const lines = [];
         let prev = null;
-        for (const n of nums) {
-            if (withContext && prev !== null && n > prev + 1) lines.push('--');
-            const r = rows.get(n);
-            lines.push(r.hit ? `${fileRow.file}:${n}: ${r.text}` : `${fileRow.file}-${n}- ${r.text}`);
-            prev = n;
+        for (const k of nums) {
+            const r = rows.get(k);
+            if (withContext && prev !== null && k > prev + 1) lines.push({ text: '--', n: null });
+            // A context row before a hit belongs to that hit: cutting there
+            // resumes at the hit.
+            lines.push({ text: r.hit ? `${fileRow.file}:${k}: ${r.text}` : `${fileRow.file}-${k}- ${r.text}`, n: r.n });
+            prev = k;
         }
-        const more =
-            fileRow.count > fileRow.shown ? `, showing ${fileRow.shown} — raise max_per_file or narrow the pattern` : '';
-        return (
-            `── ${fileRow.file} (${fileRow.count} matching line${fileRow.count === 1 ? '' : 's'}${more}; at=${fileRow.at})\n` +
-            lines.join('\n')
-        );
+        const plural = fileRow.count === 1 ? '' : 's';
+        let more = '';
+        if (fileRow.shown < fileRow.count) {
+            const from = fileRow.from || 0;
+            const range = !from
+                ? ''
+                : fileRow.shown === 1
+                  ? ` (match ${from + 1})`
+                  : ` (matches ${from + 1}-${from + fileRow.shown})`;
+            more = `, showing ${fileRow.shown}${range}`;
+            if (fileRow.passed)
+                more += ` — raise max_per_file for the rest (with paths:["${fileRow.file}"] for this file alone)`;
+        }
+        return { head: `── ${fileRow.file} (${fileRow.count} matching line${plural}${more}; at=${fileRow.at})`, lines };
     }
+
+    const GREP_OUTPUTS = ['lines', 'files', 'matches'];
 
     async function codeGrep(ws, a) {
         // THE LITERAL EYE. code_find and code_ask both search by MEANING, and
@@ -490,11 +508,27 @@ function createTools({ workspace, workspaces = () => [] } = {}) {
         // the model learned to sweep the repo with shell grep/sed instead —
         // minutes per investigation. Every matching line, its text, its
         // context, regex, case and path filters: rg, over the workspace.
+        //
+        // Enumeration ("every OKDB_* name") is a different question from
+        // "where": measured, a lines answer hit the host's output cap after
+        // 173 lines and the model reported 68 of 77 names. So: output:
+        // 'matches' (distinct matched strings with counts — rg -o | sort |
+        // uniq -c) and 'files' (rg -c) answer it in one call; counts are
+        // always exact; and a capped answer ENDS with how to get the rest
+        // (page / offset), inside the size budget rather than cut by it.
         const q = String(a.pattern ?? a.text ?? a.query ?? '');
         if (!q) return '(code_grep) — needs `pattern`: the text (or, with regex: true, the expression) to look for.';
         if (typeof ws.grep !== 'function') return legacyGrep(ws, q, a);
+        const rawOut = a.output ?? a.mode;
+        const output = rawOut == null || rawOut === '' ? 'lines' : String(rawOut).toLowerCase();
+        if (!GREP_OUTPUTS.includes(output)) {
+            return `(code_grep "${q}") — output must be one of ${GREP_OUTPUTS.map((o) => `'${o}'`).join(', ')} (got '${rawOut}').`;
+        }
         const glob = listArg(a.glob ?? a.globs ?? a.include);
         const paths = listArg(a.paths ?? a.path ?? a.dir);
+        const maxChars = Math.max(1000, num(a.max_chars ?? a.maxChars) ?? grepMaxChars);
+        const page = num(a.page);
+        const offset = num(a.offset);
         let r;
         try {
             r = await ws.grep(q, {
@@ -502,13 +536,16 @@ function createTools({ workspace, workspaces = () => [] } = {}) {
                 caseSensitive: caseArg(a),
                 glob,
                 paths,
+                output,
+                page,
+                offset,
                 context: num(a.context),
                 before: num(a.before),
                 after: num(a.after),
-                maxMatches: num(a.max_matches ?? a.maxMatches) ?? 100,
+                maxMatches: num(a.max_matches ?? a.maxMatches) ?? (output === 'matches' ? 500 : 100),
                 maxPerFile: num(a.max_per_file ?? a.maxPerFile) ?? 10,
                 // `limit` is the historical "max files".
-                maxFiles: num(a.max_files ?? a.maxFiles ?? a.limit),
+                maxFiles: num(a.max_files ?? a.maxFiles ?? a.limit) ?? (output === 'files' ? 500 : undefined),
             });
         } catch (err) {
             if (err && err.code === 'GREP_BAD_PATTERN') return `(code_grep "${q}") — ${err.message}`;
@@ -522,7 +559,10 @@ function createTools({ workspace, workspaces = () => [] } = {}) {
         ]
             .filter(Boolean)
             .join(', ');
-        if (!r.matches.length) {
+        // A result from a workspace object that predates paging/modes.
+        const counts = r.counts || r.files;
+        const total = r.total || { lines: r.files.reduce((n, f) => n + f.count, 0), files: r.files.length };
+        if (!total.lines) {
             return (
                 `(code_grep "${q}") — ${r.regex ? 'no line matches that expression' : 'that text appears nowhere'} in ${ws.id} (${r.searched} files searched; ${scope}).` +
                 (glob || paths ? ' Check the glob/paths filter, or drop it.' : '') +
@@ -530,23 +570,142 @@ function createTools({ workspace, workspaces = () => [] } = {}) {
                 ' the other case, or code_ask to search by meaning.'
             );
         }
+        const nLines = `${total.lines} matching line${total.lines === 1 ? '' : 's'}`;
+        const nFiles = `${total.files} file${total.files === 1 ? '' : 's'}`;
+        const pageNote = r.page > 1 || r.offset > 0 ? ` — page ${r.page}${r.offset ? `, from ${r.offset}` : ''}` : '';
+        const readHint =
+            '  [code_read "<file>:<from>-<to>" for more around a line; code_edit {file, find, body} to change one]';
+        const other = (o) =>
+            GREP_OUTPUTS.filter((x) => x !== o)
+                .map((x) => `output:'${x}'`)
+                .join(' or ');
+
+        // Fill the budget with rows, whole rows only; `cut` = the index of
+        // the first row that did not fit.
+        const fit = (headText, rows, reserve) => {
+            let used = headText.length + reserve;
+            for (let i = 0; i < rows.length; i++) {
+                used += rows[i].length + 1;
+                if (used > maxChars) return i;
+            }
+            return rows.length;
+        };
+        const RESERVE = 400; // the continuation + hint lines
+
+        if (output === 'files') {
+            const head = `code_grep "${q}" in ${ws.id} — ${nLines} in ${nFiles} (${r.searched} searched; ${scope})${pageNote}; matching lines per file:`;
+            const rows = r.files.map((f) => `  ${f.file}: ${f.count}`);
+            const cut = fit(head, rows, RESERVE);
+            const shownTo = r.offset + cut;
+            const tail = [];
+            if (shownTo < total.files) {
+                const restFiles = total.files - shownTo;
+                const restLines = counts.slice(shownTo).reduce((n, f) => n + f.count, 0);
+                const how = cut < rows.length ? `offset=${shownTo}` : `page=${r.page + 1}`;
+                tail.push(
+                    `  [${restFiles} more file(s) with ${restLines} matching line(s) not shown — narrow with glob/paths, or continue with ${how}]`,
+                );
+            }
+            tail.push('  [output:\'lines\' shows the lines themselves; paths:["<file>"] for one file]');
+            return [head, ...rows.slice(0, cut), ...tail].join('\n');
+        }
+
+        if (output === 'matches') {
+            const head = `code_grep "${q}" in ${ws.id} — ${total.distinct} distinct match${total.distinct === 1 ? '' : 'es'} (${total.occurrences} occurrence${total.occurrences === 1 ? '' : 's'} on ${nLines} in ${nFiles}; ${r.searched} searched; ${scope})${pageNote}; count, match, where:`;
+            const w = String(r.distinct.length ? r.distinct[0].count : 1).length;
+            const rows = r.distinct.map(
+                (d) => `  ${String(d.count).padStart(w)}  ${d.text}  (${d.files === 1 ? d.first : `${d.files} files`})`,
+            );
+            const cut = fit(head, rows, RESERVE);
+            const shownTo = r.offset + cut;
+            const tail = [];
+            if (shownTo < total.distinct) {
+                const how = cut < rows.length ? `offset=${shownTo}` : `page=${r.page + 1}`;
+                tail.push(
+                    `  [${total.distinct - shownTo} more distinct match(es) not shown — narrow the pattern or glob/paths, or continue with ${how}]`,
+                );
+            }
+            tail.push(
+                `  [output:'lines' (with paths/glob) shows where a match is; ${"output:'files'"} counts per file]`,
+            );
+            return [head, ...rows.slice(0, cut), ...tail].join('\n');
+        }
+
+        const head = `code_grep "${q}" in ${ws.id} — ${nLines} in ${nFiles} (${r.searched} searched; ${scope})${pageNote}:`;
         const byFile = new Map();
         for (const m of r.matches) {
             if (!byFile.has(m.file)) byFile.set(m.file, []);
             byFile.get(m.file).push(m);
         }
-        const total = r.files.reduce((n, f) => n + f.count, 0);
-        const head = `code_grep "${q}" in ${ws.id} — ${total} matching line${total === 1 ? '' : 's'} in ${r.files.length} file${r.files.length === 1 ? '' : 's'} (${r.searched} searched; ${scope}):`;
+        const startOf = new Map(counts.map((f) => [f.file, f.start]));
         const withContext = r.matches.some((m) => m.before.length || m.after.length);
-        const body = r.files.map((f) => renderGrepFile(f, byFile.get(f.file) || [], withContext)).join('\n\n');
+        // Flatten to rows; a hit row (and the context leading into it)
+        // carries the stream index a resume would start at.
+        const rows = [];
+        r.files.forEach((f, i) => {
+            const { head: h, lines } = renderGrepFile(f, byFile.get(f.file) || [], withContext);
+            const s0 = startOf.get(f.file);
+            const at = (n) => (n == null || s0 == null ? null : s0 + n);
+            const firstN = (byFile.get(f.file) || [])[0];
+            if (i > 0) rows.push({ text: '', s: at(firstN && firstN.n) });
+            rows.push({ text: h, s: at(firstN && firstN.n) });
+            for (const l of lines) rows.push({ text: l.text, s: at(l.n) });
+        });
+        let cut = fit(
+            head,
+            rows.map((x) => x.text),
+            RESERVE,
+        );
+        // Where the next answer should start: the first hit not rendered.
+        let resume = null;
+        if (cut < rows.length) {
+            for (let i = cut; i < rows.length; i++) {
+                if (rows[i].s != null) {
+                    resume = rows[i].s;
+                    break;
+                }
+            }
+            // A cut inside trailing context: the hits are all out; resume
+            // where the page itself ends.
+            if (resume === null && r.next) resume = r.next.offset;
+            // Leave no dangling heading or leading context for the hit the
+            // next answer starts at: it repeats them.
+            else while (cut > 0 && rows[cut - 1].s === resume) cut--;
+            while (cut > 0 && (rows[cut - 1].text === '--' || rows[cut - 1].text === '')) cut--;
+        }
+        const body = rows
+            .slice(0, cut)
+            .map((x) => x.text)
+            .join('\n');
         const tail = [];
-        if (r.unsearched) {
+        const restFrom = resume !== null ? resume : r.next ? r.next.offset : null;
+        const paged = restFrom !== null && counts.length && counts[0].start != null;
+        if (paged) {
+            const restLines = total.lines - restFrom;
+            const restFiles = counts.filter((f) => f.start + f.count > restFrom).length;
+            const how = resume !== null ? `offset=${resume}` : `page=${r.page + 1}`;
+            tail.push(
+                `  [${restLines} more matching line(s) in ${restFiles} file(s) not shown — narrow with glob/paths, use ${other('lines')} for the whole picture in one answer, or continue with ${how}]`,
+            );
+        }
+        const passed = r.files.reduce((n, f) => n + (f.passed || 0), 0);
+        if (passed && resume === null) {
+            tail.push(
+                `  [${passed} matching line(s) passed over by max_per_file (see the file headings) — raise max_per_file, narrow with glob/paths, or use ${other('lines')}]`,
+            );
+        }
+        if (!paged && r.unsearched) {
+            // A workspace object that predates paging.
             tail.push(
                 `  [stopped at ${r.matches.length} lines — ${r.unsearched} more candidate file(s) not searched; narrow with glob/paths or raise max_matches]`,
             );
+        } else if (!r.matches.length) {
+            tail.push(
+                `  [page ${r.page}${r.offset ? ` from ${r.offset}` : ''} is past the end — ${r.pages} page(s) in all]`,
+            );
         }
-        tail.push('  [code_read "<file>:<from>-<to>" for more around a line; code_edit {file, find, body} to change one]');
-        return `${head}\n${body}\n${tail.join('\n')}`;
+        tail.push(readHint);
+        return `${head}\n${body}${body ? '\n' : ''}${tail.join('\n')}`;
     }
 
     // A host whose workspace object predates grep() (only mentions()).
@@ -857,7 +1016,8 @@ function createTools({ workspace, workspaces = () => [] } = {}) {
             ),
             def(
                 'code_grep',
-                'Search file CONTENTS like ripgrep: every matching line as `line: text`, grouped by file, with optional context lines. Literal text by default (case-insensitive); regex: true for a JavaScript regular expression; glob/paths to restrict which files. Use this INSTEAD of shelling out to grep/rg/sed: it is faster (index-accelerated, and on a remote workspace it searches where the files live), covers exactly the project (no node_modules, .gitignored or secret files), and every hit is a file:line code_read and code_edit accept. code_find/code_ask match by meaning.',
+                'Search file CONTENTS like ripgrep: every matching line as `line: text`, grouped by file, with optional context lines. Literal text by default (case-insensitive); regex: true for a JavaScript regular expression; glob/paths to restrict which files. Use this INSTEAD of shelling out to grep/rg/sed: it is faster (index-accelerated, and on a remote workspace it searches where the files live), covers exactly the project (no node_modules, .gitignored or secret files), and every hit is a file:line code_read and code_edit accept. code_find/code_ask match by meaning. ' +
+                    "Pick the output for the question: 'lines' (default) = WHERE, the lines themselves; 'files' = which files and how many matching lines each (rg -c); 'matches' = the DISTINCT matched strings with counts (rg -o | sort | uniq -c) — use it to ENUMERATE (\"every OKDB_[A-Z_]+ env var\", \"all event names\"): one call, the complete list. Counts in the heading are always exact; a capped answer ends with a line saying what was not shown and the page/offset that continues it — never report a partial list as complete.",
                 {
                     pattern: {
                         type: 'string',
@@ -880,8 +1040,35 @@ function createTools({ workspace, workspaces = () => [] } = {}) {
                         description: 'Only under these workspace-relative directories or files ("src", "lib/util.js")',
                     },
                     context: { type: 'number', description: 'Lines of context before and after each match (default 0)' },
-                    max_matches: { type: 'number', description: 'Max matching lines in total (default 100)' },
-                    max_per_file: { type: 'number', description: 'Max matching lines shown per file (default 10)' },
+                    output: {
+                        type: 'string',
+                        enum: ['lines', 'files', 'matches'],
+                        description:
+                            "'lines' (default): matching lines with text; 'files': files with match counts; 'matches': distinct matched strings with occurrence counts — for enumerating names/values",
+                    },
+                    page: {
+                        type: 'number',
+                        description:
+                            'Which page of a capped answer (default 1); the answer says when there is a next one',
+                    },
+                    offset: {
+                        type: 'number',
+                        description:
+                            'Resume at this position (a matching line, file or distinct match, 0-based) — use the offset a cut-off answer names',
+                    },
+                    max_matches: {
+                        type: 'number',
+                        description:
+                            "Page size: matching lines (default 100), or distinct strings for output:'matches' (default 500)",
+                    },
+                    max_per_file: {
+                        type: 'number',
+                        description: 'Max matching lines shown per file per page (default 10)',
+                    },
+                    max_files: {
+                        type: 'number',
+                        description: "Max files per page (default unlimited; 500 for output:'files')",
+                    },
                 },
                 req('pattern'),
             ),

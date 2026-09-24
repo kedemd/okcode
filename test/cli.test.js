@@ -124,7 +124,15 @@ describe('cli', () => {
     });
 
     it('grep, outline, refs, packages, structure, stats', { skip }, () => {
-        assert.match(run(['grep', 'TAX_RATE = 0.17']).stdout, /lib\/math\.js:9/);
+        assert.match(run(['grep', 'TAX_RATE = 0.17']).stdout, /lib\/math\.js:9: const TAX_RATE = 0\.17;/);
+        const g = run(['grep', '^function \\w+', '--regex', '--glob', 'lib/*.js', '--glob', '!factory.js', '--context', '1']);
+        assert.equal(g.code, 0, g.stderr);
+        assert.match(g.stdout, /lib\/math\.js:5: function add\(a, b\) \{\nlib\/math\.js-6- {5}return a \+ b;/);
+        assert.doesNotMatch(g.stdout, /lib\/factory\.js:/);
+        const gj = JSON.parse(run(['grep', 'add', '--path', 'lib', '--max-per-file', '1', '--json']).stdout);
+        assert.deepEqual([gj.matches.length, gj.files[0].count], [1, 5]);
+        assert.match(run(['glob', 'lib/*.js,!lib/unicode.js']).stdout, /2 files:\n {2}lib\/factory\.js/);
+        assert.deepEqual(JSON.parse(run(['glob', '*.mjs', '--json']).stdout).files.map((f) => f.file), ['lib/esm.mjs']);
         const o = run(['outline', 'lib/factory.js']);
         assert.equal(o.code, 0, o.stderr);
         assert.match(o.stdout, /makeCounter/);

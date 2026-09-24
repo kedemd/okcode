@@ -12,6 +12,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { splitList } = require('../src/grep');
 
 const USAGE = `okcode — find, read and edit code by name
 
@@ -34,7 +35,8 @@ look up
   structure [--dir sub/]           directories, sizes, largest symbols
   find <query> [--kind K]          where a symbol or phrase is defined
   refs <query>                     where it is used, by enclosing symbol
-  grep <text>                      exact text → file:line
+  grep <pattern> [--glob G]        rg over the workspace: every matching line
+  glob <pattern>                   files whose paths match a glob
   outline <file>                   one file in named pieces with line ranges
   read <symbol|file#symbol|file|file:a-b>
   read-at <file> <a> <b>           a line range (at= on stderr)
@@ -64,7 +66,8 @@ const HELP = {
         'okcode structure [--dir sub/]\n  Directories by symbol count, total lines, and the largest top-level symbols.',
     find: 'okcode find <query> [--kind function|class|method|const|…] [--limit N]\n  Definitions by name, doc prose and file content.',
     refs: 'okcode refs <query> [--limit N]\n  Every textual use, attributed to the symbol containing it.',
-    grep: 'okcode grep <text> [--limit N]\n  Exact, case-insensitive text → file:line.',
+    grep: 'okcode grep <pattern> [--regex] [--case-sensitive | --smart-case] [--glob G[,G…]] [--path DIR[,…]]\n            [--context N] [--max N] [--max-per-file N] [--limit FILES]\n  Every matching line as file:line: text, grouped by file (rg-style). Literal and\n  case-insensitive by default; --glob takes rg globs ("!x" excludes), repeatable.',
+    glob: 'okcode glob <pattern>[,<pattern>…] [--limit N]\n  Workspace files whose paths match (rg globs; "!x" excludes). Reads no file.',
     outline:
         'okcode outline <file> [--limit N]\n  The file in named pieces (symbols, regions or chunks) with line ranges and at=.',
     read: 'okcode read <symbol | parent.symbol | file#symbol | file | file:a-b>\n  Body on stdout; location and at= on stderr.',
@@ -86,7 +89,9 @@ const HELP = {
 };
 
 // ── argv ────────────────────────────────────────────────────────────────
-const BOOL = new Set(['json', 'refresh', 'force', 'create', 'all', 'help', 'h']);
+const BOOL = new Set(['json', 'refresh', 'force', 'create', 'all', 'help', 'h', 'regex', 'case-sensitive', 'smart-case']);
+// Flags that may be given more than once; the values join as a comma list.
+const REPEAT = new Set(['glob', 'path']);
 
 function parseArgs(argv) {
     const cmd = argv[0] && !argv[0].startsWith('-') ? argv[0] : null;
@@ -116,7 +121,7 @@ function parseArgs(argv) {
         } else {
             value = true;
         }
-        flags[name] = value;
+        flags[name] = REPEAT.has(name) && typeof flags[name] === 'string' ? `${flags[name]},${value}` : value;
     }
     return { cmd, flags, positional };
 }
@@ -586,10 +591,43 @@ const WS_COMMANDS = {
     structure,
     find,
     refs,
-    grep: (ws) =>
-        lookupVia(ws, 'code_grep', { text: need(positional[0], 'grep needs text'), limit: flags.limit }, () =>
-            ws.mentions(positional[0], { limit: Number(flags.limit) || 20 }),
-        ),
+    grep: (ws) => {
+        const pattern = need(positional[0], 'grep needs a pattern');
+        const kase = flags['case-sensitive'] === true ? true : flags['smart-case'] === true ? 'smart' : false;
+        const args = {
+            pattern,
+            regex: flags.regex === true,
+            case_sensitive: kase,
+            glob: splitList(flags.glob),
+            paths: splitList(flags.path),
+            context: flags.context,
+            before: flags.before,
+            after: flags.after,
+            max_matches: flags.max,
+            max_per_file: flags['max-per-file'],
+            limit: flags.limit,
+        };
+        return lookupVia(ws, 'code_grep', args, () =>
+            ws.grep(pattern, {
+                regex: args.regex,
+                caseSensitive: kase,
+                glob: args.glob,
+                paths: args.paths,
+                context: flags.context,
+                before: flags.before,
+                after: flags.after,
+                maxMatches: flags.max,
+                maxPerFile: flags['max-per-file'],
+                maxFiles: flags.limit,
+            }),
+        );
+    },
+    glob: (ws) => {
+        const pats = need(splitList(positional), 'glob needs a pattern');
+        return lookupVia(ws, 'code_glob', { pattern: pats, limit: flags.limit }, () =>
+            ws.glob(pats, { limit: Number(flags.limit) || 0 }),
+        );
+    },
     outline: (ws) =>
         lookupVia(ws, 'code_outline', { file: need(positional[0], 'outline needs <file>'), limit: flags.limit }, () =>
             ws.outline(positional[0], { limit: Number(flags.limit) || 60 }),

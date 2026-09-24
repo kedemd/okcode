@@ -262,6 +262,42 @@ describe('embedding profiles', () => {
         await ws.close();
     });
 
+    it('reopening repairs a pipeline whose member engines are gone (okdb repairs in createPipeline)', async () => {
+        const { db: own, dir } = await ownDb('repair');
+        try {
+            const prof = [PROFILES[0]];
+            const st1 = await openStore({ db: own, id: 'rep', access: localFs(root), profiles: prof });
+            const ws1 = await openWorkspace({ id: 'rep', access: localFs(root), store: st1 });
+            await ws1.sync();
+            await ws1.flush();
+            await st1.settle();
+            const [p1] = await st1.profiles();
+            assert.ok(p1.status.vector_count > 0, 'embedded before the loss');
+            await ws1.close();
+            // The pipeline record survives, its indexer + search engines do not.
+            const scoped = `${envNameFor('rep')}:${p1.pipeline}`;
+            await own.engines.uninstallEngine('vector-search', scoped);
+            await own.engines.uninstallEngine('indexer', scoped);
+
+            const st2 = await openStore({ db: own, id: 'rep', access: localFs(root), profiles: prof });
+            const [p2] = await st2.profiles();
+            assert.equal(p2.error, null, 'the profile is usable, not "Pipeline already exists"');
+            const view = await own.env(envNameFor('rep')).pipelines.get(p2.pipeline);
+            assert.ok(
+                view.engines.every((e) => e.exists),
+                JSON.stringify(view.engines.map((e) => [e.type, e.exists])),
+            );
+            const ws2 = await openWorkspace({ id: 'rep', access: localFs(root), store: st2 });
+            await st2.settle();
+            const hits = await st2.ask('patience', { profile: 'small', limit: 3 });
+            assert.ok(hits.length > 0, 'the repaired pipeline re-embedded the workspace');
+            await ws2.close();
+        } finally {
+            await own.close().catch(() => {});
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
     it('a profile without dims learns them from the model', async () => {
         const st = await openStore({
             db,

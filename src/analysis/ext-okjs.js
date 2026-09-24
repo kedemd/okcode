@@ -55,17 +55,24 @@ function baseURLFor(path) {
 // addresses a symbol's full body, and a "component" symbol should be no
 // different.
 function translateSymbols(analysis) {
-    return (analysis.symbols || [])
-        .filter((s) => s.kind === 'component' && s.range)
-        .map((s) => ({
-            name: s.name,
-            kind: s.kind,
-            path: s.name,
-            start: s.range.start,
-            end: s.range.end,
-            lineStart: s.range.loc.start.line,
-            lineEnd: s.range.loc.end.line,
-        }));
+    return (
+        (analysis.symbols || [])
+            .filter((s) => s.kind === 'component' && s.range)
+            // The tag is a name, and a name is indexed: it goes out as a string
+            // whatever the analyser handed over (okdb rejects a non-scalar
+            // indexed value, aborting the write it rides in).
+            .map((s) => ({ s, name: s.name == null ? '' : String(s.name) }))
+            .filter(({ name }) => name)
+            .map(({ s, name }) => ({
+                name,
+                kind: s.kind,
+                path: name,
+                start: s.range.start,
+                end: s.range.end,
+                lineStart: s.range.loc.start.line,
+                lineEnd: s.range.loc.end.line,
+            }))
+    );
 }
 
 // Dependency edges, straight from the analyser's own resolution — never a

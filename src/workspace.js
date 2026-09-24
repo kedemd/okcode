@@ -279,6 +279,9 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
     // rel -> 'save' | 'remove' (last op wins); flushed as one transaction.
     const pending = new Map();
     const pendingPackages = [];
+    // Files the store refused to write (rel → error): a scan error, reported
+    // by structure() until a later write of the same file succeeds.
+    const storeErrors = new Map();
 
     // ── ingest ──────────────────────────────────────────────────────────
 
@@ -743,12 +746,19 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
             else if (files.has(rel)) saves.push(files.get(rel));
         }
         pending.clear();
+        let result;
         try {
-            await store.saveFiles(saves, removals);
+            result = await store.saveFiles(saves, removals);
         } catch {
             /* the store is a cache; a failed write is a cold start, not a crash */
         }
-        return { written: saves.length + removals.length };
+        // One file the store cannot take is left out of the batch, not the
+        // batch with it — and is named, not silently absent after a restart.
+        const failed = (result && result.failed) || [];
+        const bad = new Set(failed.map((f) => f.rel));
+        for (const rel of [...saves.map((f) => f.rel), ...removals]) if (!bad.has(rel)) storeErrors.delete(rel);
+        for (const f of failed) storeErrors.set(f.rel, f.error);
+        return { written: result ? result.written : saves.length + removals.length, failed };
     }
     function flush() {
         if (flushTimer) {
@@ -1315,6 +1325,9 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
                 symbols: all.reduce((a, f) => a + (f.symbols || []).length, 0),
                 dirs: [...byDir.values()].sort((a, b) => b.symbols - a.symbols),
                 unparsed,
+                // Files the store could not persist: indexed in memory, but a
+                // restart re-reads them rather than finding them warm.
+                unsaved: [...storeErrors].map(([file, error]) => ({ file, error })),
                 largest,
             };
         },
@@ -2448,6 +2461,8 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
                 failedParse: all.filter((f) => f.lang === 'javascript' && !f.parsed).length,
                 cachedText: all.filter((f) => typeof f.content === 'string').length,
                 pendingWrites: pending.size,
+                // Files the store refused (see structure().unsaved).
+                unsaved: storeErrors.size,
                 byLang,
             };
         },

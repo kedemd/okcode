@@ -170,6 +170,37 @@ function signatureOf(src, node, name) {
     return `${fn.async ? 'async ' : ''}${name}(${params})`;
 }
 
+// The name a member is addressed by — ALWAYS a string. A plain key is its
+// identifier (or its literal, stringified: `7() {}` is "7", and `0() {}` is
+// no longer dropped for being falsy). A COMPUTED key is named by its source
+// text in brackets, exactly as the code spells it — `[Symbol.iterator]`,
+// `[/re/]`, `[KEY]` (a computed plain string or number is just its value) —
+// because that is what a reader searches for, and because the raw key node's
+// value (a RegExp for `[/re/]`, a number for `[42]`) is
+// not a name: stored as one, it reached an indexed field, where okdb ≥ 2.3.2
+// rejects a non-scalar and aborts the whole write. null when there is none.
+const KEY_TEXT_MAX = 120;
+function memberKeyName(src, m) {
+    const k = m && m.key;
+    if (!k) return null;
+    if (m.computed) {
+        // `['lit']`, `[42]` and a plain `[`lit`]` name exactly what `lit` and
+        // `42` would; anything else (a regex, an identifier, an expression)
+        // is named by its source.
+        if (k.type === 'Literal' && !k.regex && k.value != null && typeof k.value !== 'object') return String(k.value);
+        if (k.type === 'TemplateLiteral' && !k.expressions.length && k.quasis.length === 1) {
+            const cooked = k.quasis[0].value.cooked;
+            if (typeof cooked === 'string' && cooked) return cooked;
+        }
+        const text = src.slice(k.start, k.end).replace(/\s+/g, ' ').trim();
+        if (!text) return null;
+        return `[${text.length > KEY_TEXT_MAX ? `${text.slice(0, KEY_TEXT_MAX)}…` : text}]`;
+    }
+    if (typeof k.name === 'string' && k.name) return k.name;
+    if (k.type === 'Literal' && k.value != null && typeof k.value !== 'object') return String(k.value);
+    return null;
+}
+
 // Parse once, try script then module. sourceType matters: an .mjs parsed as a
 // script fails on `import`, which is exactly the honest failure acorn gives
 // and a regex would have papered over.
@@ -397,7 +428,7 @@ function extractJavaScript(path, src) {
         if (!obj || obj.type !== 'ObjectExpression' || depth > MAX_DEPTH) return;
         let prevEnd = obj.start;
         for (const p of obj.properties || []) {
-            const name = p.key && (p.key.name || p.key.value);
+            const name = memberKeyName(src, p);
             const fn = fnOf(p.value);
             if (name && fn) {
                 const child = push(name, 'method', p, {
@@ -491,7 +522,7 @@ function extractJavaScript(path, src) {
         if (node.type === 'ClassDeclaration' && node.id) {
             const child = push(node.id.name, 'class', node, { parent, prevEnd });
             for (const m of node.body.body || []) {
-                const name = m.key && (m.key.name || m.key.value);
+                const name = memberKeyName(src, m);
                 if (!name || depth + 1 > MAX_DEPTH) continue;
                 push(name, 'method', m, { parent: child, signature: signatureOf(src, { init: m.value }, name) });
                 descend(m.value, `${child}.${name}`, depth + 2);

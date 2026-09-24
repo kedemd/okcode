@@ -140,7 +140,7 @@ Notes: `reset('fts')` needs the workspace **open** in this process (the content 
 
 **Persistence** (okdb env `okcode`): `workspaces` (id → env, added, lastSync, access kind/root), `embedders` (name → provider/fields (url, model)/dims, a custom profile's `id`, never a function or a function-sourced secret; a profile whose function was not re-supplied on open reports `needs-config`), `settings` (`active`).
 
-**Roles.** okdb runs embedding (and processor) work only in a process with those roles. Management calls act on durable state (records, cursors, rebuild requests) so they work from any process; the process holding the roles does the work. okcode never assumes the caller embeds.
+**Roles.** okdb runs embedding (and processor) work only in a process with those roles. Management calls act on durable state (records, cursors, rebuild requests) so they work from any process; the process holding the roles does the work. okcode never assumes the caller embeds. A process without engines never creates an embedder or pipeline: it attaches to the one an indexing process created. Opened before that exists, its profile is `pending` in `status()` (not an error, not logged) and attaches on the next `status()` or `ask()` — no restart; until then `ask()` throws `OKCODE_NO_EMBEDDINGS` with `err.pending = true`.
 
 ## 10. What the host keeps (the brain, for example)
 

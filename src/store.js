@@ -610,7 +610,7 @@ async function openStore({ db, id, access, profiles = [], log = () => {} } = {})
                 if (p.scoped) {
                     try {
                         const live = db.embeddings.indexer(p.scoped);
-                        status = live ? await live.stats() : (db.embeddings._durableIndexerStats?.(p.scoped) ?? null);
+                        status = live ? await live.stats() : ((await db.embeddings._durableIndexerStats?.(p.scoped)) ?? null);
                     } catch (err) {
                         status = { error: err.message };
                     }

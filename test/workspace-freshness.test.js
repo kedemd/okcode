@@ -125,6 +125,22 @@ for (const fac of facades()) {
             assert.equal(c.counts.list, 2);
         });
 
+        it('a sync of an untouched tree re-ingests no opaque file (binary, empty)', async () => {
+            // isTextual() returned `undefined` for a non-text path, and the re-stale check compared
+            // it with `!==` against the stored row's boolean — so every opaque file (images, fonts,
+            // .gitkeep) counted as changed and was re-written on EVERY sync (13 of them, every
+            // ~12 s, in a live brain workspace).
+            const { ws, write } = await fixture();
+            write('logo.png', Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 1, 2, 3]));
+            write('.gitkeep', '');
+            const first = await ws.sync();
+            assert.equal(first.reparsed, 2, 'the two new opaque files are ingested once');
+            const again = await ws.sync();
+            assert.equal(again.reparsed, 0, 'and not again');
+            const forced = await ws.sync({ force: true });
+            assert.equal(forced.reparsed, 0, 'not even on a forced re-hash');
+        });
+
         it('a sync of an untouched tree hashes and reads nothing', async () => {
             const { ws, c } = await fixture();
             const r = await ws.sync();

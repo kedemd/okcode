@@ -14,7 +14,7 @@
         "README.md"
     ],
     "scripts": {
-        "test": "node --test --test-force-exit test/"
+        "test": "node --test --test-force-exit test/*.test.js"
     },
     "engines": {
         "node": ">=20"

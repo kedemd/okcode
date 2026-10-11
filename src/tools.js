@@ -567,10 +567,16 @@ function createTools({ workspace, workspaces = () => [], grepMaxChars = 12000 } 
         // A library path (node_modules/<pkg>…) was searched directly. A walk
         // the cap cut short makes every count below partial: that goes right
         // under the heading, where a host that clips the end cannot drop it.
-        const capNote =
+        // A named library path with nothing there (not installed, a typo) is
+        // said as loudly: zero hits there is no evidence of absence.
+        const capNote = [
+            r.library && r.library.missing
+                ? `  [NOT FOUND: nothing at ${r.library.missing.join(', ')} — not installed, or a wrong path; no match there means nothing. Check the package name (code_files or a listing of node_modules)]`
+                : '',
             r.library && r.library.truncated
                 ? `  [PARTIAL: listing ${r.library.paths.join(', ')} stopped at ${r.library.cap} files — narrow the path (one package, or its src/) for a complete answer]`
-                : '';
+                : '',
+        ].filter(Boolean).join('\n');
         const withCap = (text) => (capNote ? text.replace(/^[^\n]*/, (h) => `${h}\n${capNote}`) : text);
         const scope = [
             glob ? `glob ${glob.join(' ')}` : '',
@@ -843,8 +849,12 @@ function createTools({ workspace, workspaces = () => [], grepMaxChars = 12000 } 
             throw err;
         }
         const where = scope ? `${scope} in ${ws.id}` : ws.id;
+        if (!hits.length && hits.library && hits.library.missing)
+            return `(code_find "${q}") — NOT FOUND: nothing at ${hits.library.path} — not installed, or a wrong path; no hit there means nothing.`;
         if (!hits.length) return `(code_find "${q}") — no ${uses ? 'uses' : 'definitions'} found in ${where}.`;
-        const lib = hits.library
+        const lib = hits.library && hits.library.missing
+            ? `  [NOT FOUND: nothing at ${hits.library.path} — not installed, or a wrong path; no hit there means nothing]\n`
+            : hits.library
             ? `  [library code, looked up by name in a direct parse of ${hits.library.files} file(s) — not indexed${hits.library.truncated ? '; PARTIAL: the parse cap stopped the listing, narrow the path' : ''}]\n`
             : '';
         return (

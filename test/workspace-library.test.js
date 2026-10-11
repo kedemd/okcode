@@ -277,6 +277,21 @@ for (const fac of FACADES) {
             assert.match(await tools.render('code_outline', { file: PKG }), /PARTIAL: stopped at 2 files/);
         });
 
+        it('a library path with nothing there says so: never a silent "no match"', async () => {
+            const { ws } = await setup();
+            const r = await ws.grep('"<each>"', { paths: ['node_modules/not-installed'] });
+            assert.deepEqual(r.library.missing, ['node_modules/not-installed']);
+            assert.equal(r.total.lines, 0);
+            const found = await ws.grep('"<each>"', { paths: [PKG] });
+            assert.equal(found.library.missing, undefined, 'a package that is there is never missing');
+            const f = await ws.find('bindEach', { path: 'node_modules/not-installed' });
+            assert.equal(f.library.missing, true);
+            const tools = createTools({ workspace: async () => ws, workspaces: () => [{ id: ws.id }] });
+            const text = await tools.render('code_grep', { pattern: '"<each>"', paths: ['node_modules/not-installed'] });
+            assert.match(text.split('\n')[1], /NOT FOUND: nothing at node_modules\/not-installed — not installed, or a wrong path/);
+            assert.match(await tools.render('code_find', { query: 'bindEach', path: 'node_modules/not-installed' }), /NOT FOUND/);
+        });
+
         it('tools: grep/read/outline/find take a library path; ask says it is unsupported', async () => {
             const { ws } = await setup();
             const tools = createTools({ workspace: async () => ws, workspaces: () => [{ id: ws.id }] });

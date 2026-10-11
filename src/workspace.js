@@ -1086,13 +1086,17 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
     // it — so a package's dist/ or vendor/ (often all the code it ships) is
     // in. Secret, opaque and oversized files are out, as everywhere; the
     // project's .gitignore is not consulted (it ignores node_modules itself).
-    // `cap` bounds the walk across all roots.
+    // `cap` bounds the walk across all roots. `missing`: the named roots the
+    // listing found nothing at — not installed, a typo, or empty. Said, never
+    // left to read as "no match": an absent hit is evidence only where the
+    // search actually looked.
     async function listLibrary(roots, cap) {
         const uniq = [...new Set(roots)];
         const tops = uniq.filter((r) => !uniq.some((o) => o !== r && r.startsWith(`${o}/`)));
         const seen = new Map();
         let truncated = false;
         let listedN = 0;
+        const missing = [];
         for (const root of tops) {
             const left = cap - listedN;
             if (left <= 0) {
@@ -1107,6 +1111,7 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
             }
             if (listed.truncated) truncated = true;
             listedN += listed.length;
+            if (!listed.some((r) => r.path === root || r.path.startsWith(`${root}/`))) missing.push(root);
             for (const r of listed) {
                 // A facade that ignores `under` hands back the whole tree:
                 // only the subtree counts, whatever arrived.
@@ -1117,7 +1122,7 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
             }
         }
         const rows = [...seen.values()].sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
-        return { rows, truncated, roots: tops };
+        return { rows, truncated, roots: tops, missing };
     }
 
     // One library file named by path, read directly: { ok, rel, text, at,
@@ -1203,7 +1208,7 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
         const out = [...next.entries()]
             .map(([rel, e]) => ({ rel, ...e }))
             .sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
-        return { root, files: out, truncated: listed.truncated };
+        return { root, files: out, truncated: listed.truncated, missing: listed.missing.length > 0 };
     }
 
     // A read of a library file named by path: the whole file (capped by
@@ -1579,6 +1584,7 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
                           files: libFiles,
                           truncated: libList.truncated,
                           cap: opts.libraryFiles,
+                          ...(libList.missing.length ? { missing: libList.missing } : {}),
                       },
                   }
                 : {}),
@@ -2207,7 +2213,7 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
                         }
                     }
                     const res = hits.sort((a, b) => b.score - a.score || a.span - b.span).slice(0, limit);
-                    res.library = { path: lib.rel, files: scan.files.length, truncated: scan.truncated };
+                    res.library = { path: lib.rel, files: scan.files.length, truncated: scan.truncated, ...(scan.missing ? { missing: true } : {}) };
                     return res;
                 }
                 const inPath = pathMatcher({ paths: [path] });

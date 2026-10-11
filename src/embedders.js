@@ -121,6 +121,32 @@ function keyedFactory(db, baseType, keyFn) {
     };
 }
 
+// The derived factories of the host's function profiles, registered on a db
+// that is NOT open yet. okdb restarts a store's persisted embedder engines
+// inside open(), before fromHost below runs: a custom or keyed profile's type
+// was unknown at that moment ("Unknown embedder type"), its engine failed to
+// start, and asking by meaning stayed broken after every restart. Registering
+// is idempotent (fromHost registers the same type again after open). A keyed
+// profile whose base type the db does not know yet is left to fromHost.
+function preRegister(db, hostProfiles) {
+    for (const [name, cfg] of Object.entries(hostProfiles || {})) {
+        if (!cfg || typeof cfg !== 'object') continue;
+        try {
+            if (typeof cfg.embed === 'function' && typeof cfg.id === 'string' && cfg.id) {
+                db.embeddings.registerEmbedderFactory(derivedType(name), customFactory(cfg), { label: `okcode custom (${name})` });
+            } else if (typeof cfg.type === 'string' && cfg.type) {
+                const keyFn = typeof cfg.apiKey === 'function' ? cfg.apiKey : typeof cfg.api_key === 'function' ? cfg.api_key : null;
+                if (!keyFn) continue;
+                db.embeddings.registerEmbedderFactory(derivedType(name), keyedFactory(db, cfg.type, keyFn), {
+                    label: `okcode ${cfg.type} (${name})`,
+                });
+            }
+        } catch {
+            /* fromHost, after open, registers it or says why it cannot */
+        }
+    }
+}
+
 // Translate one host profile. Registers a derived factory on `db` when the
 // profile carries a function. Returns:
 //   profile  — the store profile { name, embedder, dims }
@@ -279,4 +305,4 @@ function fromRecord(db, rec) {
 // The model name the store derives the pipeline name from (store.js modelOf).
 const modelOf = (embedder) => (embedder && (embedder.model || embedder.type)) || null;
 
-module.exports = { fromHost, fromRecord, partsOfRecord, describe, derivedType, modelOf, DERIVED_PREFIX };
+module.exports = { preRegister, fromHost, fromRecord, partsOfRecord, describe, derivedType, modelOf, DERIVED_PREFIX };

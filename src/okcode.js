@@ -108,6 +108,8 @@ async function open({
         const flags = {};
         for (const k of ['processors', 'engines', 'compaction']) if (k in r) flags[k] = r[k];
         db = new OKDB(path, flags);
+        // before open(): okdb restarts the persisted embedder engines inside it
+        emb.preRegister(db, hostProfiles);
         await db.open();
         if (license != null) {
             // Before the management env, workspaces or pipelines exist, so none of

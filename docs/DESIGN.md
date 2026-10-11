@@ -21,12 +21,14 @@ It is **host-agnostic**: it does not know about the brain, machines, hosts, cred
 
 ## 3. Access: a facade, not a connection
 
-okcode never opens connections. The host passes an access facade per workspace ([ACCESS.md](ACCESS.md)): `list`, `stat`, `read`, `commit`, optional `lock` / `exec` / `remove`. Everything is async and batched.
+okcode never opens connections. The host passes an access facade per workspace ([ACCESS.md](ACCESS.md)): `list`, `stat`, `read`, optional `commit` / `lock` / `exec` / `remove`. Everything is async and batched. A facade without `commit` is **read-only**: every edit is refused (`OKCODE_READ_ONLY`, in the edit's result) before anything is resolved.
 
-Two facades ship:
+Four facades ship:
 
 - `localFs(root)` — Node `fs`; the fast path for local folders.
 - `shell({ root, run, dialect })` — bash/PowerShell scripts with base64 on the wire, over any `run(script, stdin) → Promise<stdout>`. This is what makes remote workspaces **agentless**: the target needs only a shell. The host brings the transport (`ssh`, `docker exec`, …) — e.g. the brain's existing ssh driver.
+- `fn({ list, read, stat? })` — read-only, over the host's own functions (`stat` derived from `list` when absent).
+- `memory(map)` — read-only, over a live `Map<path, { bytes, mtime }>`.
 
 Why a facade: the host already owns connections, credentials and policy (the brain's machine handles, `writeRoots`, identity files). Duplicating that inside okcode would be a second, divergent copy of the same thing. Why okcode still ships `shell`: the byte-exact scripts (base64 round trip, remote hashing, atomic compare-and-swap publish) are the hard, reusable part; every host would otherwise rewrite them.
 
@@ -90,7 +92,7 @@ okcode.open({
     embedders: {
         qwen:  { type: 'ollama', model: 'qwen3-embedding:0.6b', url },              // okdb built-in driver
         oa3:   { type: 'openai', model: 'text-embedding-3-small', apiKey: () => … }, // secret supplied at runtime
-        local: { embed: async (texts) => vectors, id: 'my-embedder@2', dims: 768 },  // anything custom
+        local: { embed: async (texts, { workspace }) => vectors, id: 'my-embedder@2', dims: 768 },  // anything custom
     },
     active: 'qwen',
 });
@@ -113,6 +115,7 @@ okcode.open({
 - **Orphans.** A store no profile addresses any more (its profile's url/model/dims changed, or it was named by an older scheme) is not deleted behind the host's back — another process may still be configured for it — but it is not served either. `status()` lists it per workspace under `orphaned: [{ pipeline, done, vectors }]`, and `removeOrphaned(id?)` drops it (its indexer otherwise keeps embedding changes against the old embedder). There was no released okcode before identity naming, so there is no migration: stores named `code_<model>_<dims>` simply show up as orphaned.
 - `apiKey` may be a function, so secrets stay in the host (never written to okdb). A plain string is accepted and stored by okdb (masked in its admin UI).
 - A custom `embed` is registered as an okdb embedder factory, so okdb's batching, content-hash dedupe and retries apply unchanged.
+- **Context.** A custom function is called as `embed(texts, { workspace })` (and `embedBatch(texts, { workspace })`): one profile embeds for every workspace, and which one's text it is — the host's id — is what a host needs to decide where that text may be sent (a private workspace must not reach an untrusted embedder). okdb hands a factory only its embedder config, so the store writes the workspace id into each workspace's embedder config (custom profiles only; it is not part of okdb's fingerprint `{ type, model, dims }`, so nothing is re-embedded); a pipeline created before this is patched and its embedder restarted where engines run. `workspace` is `null` for an engine not tied to one. A function that takes one argument ignores it.
 - Profiles are independent: adding one builds its vectors alongside; symbols, FTS and file rows are shared.
 - No embedders configured → symbols + FTS only (`ask` unavailable).
 
@@ -130,7 +133,7 @@ Library, CLI and (optionally) tools expose the same operations:
 | `embedders()`                                                                      | `[{ name, type, endpoint, model, dims, identity, active, state }]` — no functions, no secrets                     |
 | `removeOrphaned(id?)`                                                              | drop stores no profile addresses any more (`status().workspaces[].orphaned`)                                      |
 | `ws.files({ dir, lang, limit, stat })` / `ws.symbols(file, { kind, limit, stat })` | cheap listings from the stored rows — never read file content (below)                                             |
-| `addWorkspace(id, { access })` / `removeWorkspace(id)`                             | register (and scan) / drop the env                                                                                |
+| `addWorkspace(id, { access, index })` / `removeWorkspace(id)`                      | register (and scan) / drop the env; `index: 'none'` = unindexed (below): no env, no scan, nothing to drop          |
 
 **Querying with a precomputed vector.** A host that embeds each question once and shares the vector across several indexes passes it instead of the text: `ws.ask({ vector, text?, identity? }, opts)` (also `store.ask`, `compare`, and the `code_ask` tool's `vector`/`identity` args — host-only, not in the model-facing schema). `vector` is a `Float32Array` (a number array is accepted). With a vector **no embed call is made** for the query. The lexical eyes (names, doc prose, file text) need words: with a vector and no `text` the answer is semantic hits only; with both, the three eyes fuse exactly as for a string. The vector must have the profile's dims (`OKCODE_DIMS_MISMATCH`, never searched); when the host passes the `identity` it computed the vector in, it must equal the profile's (`OKCODE_IDENTITY_MISMATCH`). A host decides compatibility up front by comparing its identity with `embedders()[i].identity` and passes a vector only on a match. A query with neither text nor vector is `OKCODE_BAD_QUERY`.
 
@@ -146,7 +149,16 @@ Library, CLI and (optionally) tools expose the same operations:
 - Bounds: grep lists at most `libraryFiles` (20 000) files per call, an outline or name lookup parses at most `libraryParseFiles` (2 000); over the cap the answer is partial and says so (`truncated` / `capped`; the tools print `PARTIAL … narrow the path` under the heading). Grep's output caps apply as usual. A `..` or a symlink out of the root is refused (`OKCODE_BAD_PATH` from grep/find, `ok: false` from read/outline).
 - The tools take the same paths: `code_grep` `paths`, `code_read`, `code_outline` `file`, `code_find` `path`; a library read prints no `at` (it cannot be edited through okcode).
 
-Notes: `reset('fts')` needs the workspace **open** in this process (the content index reads through its access facade); `'vectors'` works from any process. `sync()` returns `[{ id, scanned, changed, removed, ms }]`. `compare()` returns raw per-profile vector hits (not the merged `ask` results, which would hide the differences). Error codes: `OKCODE_UNKNOWN_WORKSPACE`, `OKCODE_WORKSPACE_NOT_OPEN`, `OKCODE_UNKNOWN_EMBEDDER`, `OKCODE_EMBEDDER_EXISTS`, `OKCODE_NEEDS_CONFIG`, `OKCODE_NEEDS_ID`, `OKCODE_UNKNOWN_EMBEDDER_TYPE`, `OKCODE_NO_EMBEDDINGS`, `OKCODE_DIMS_MISMATCH`, `OKCODE_IDENTITY_MISMATCH`, `OKCODE_BAD_QUERY`.
+**Unindexed workspaces — `addWorkspace(id, { access, index: 'none' })`.** The whole workspace is served the way library code is (above), for material a host wants navigated but never indexed (the brain's kept reads of one task): no okdb env, no store, no registry record, no open-time walk, never embedded; it exists in this process only, until `removeWorkspace(id)`. Every verb goes to the facade on every call, so what the facade holds now is what is answered:
+
+- `grep(pattern, opts)` — every file (no `paths`) or the named ones, read and matched directly (`indexed: false`, `via: 'direct'` or `'target'`); `glob`, `files()` list fresh (no line or symbol counts).
+- `read(path | path:from-to | path#Heading)` — every name is a path (there is no symbol index); `outline(path)` — a file's symbols, sections (below) or chunks; `outline('.')` or a folder — its files with their top-level names (headings for documents); `find(name, { path? })` — by name (symbols and headings) in an in-memory parse.
+- `ask` throws `OKCODE_NOT_INDEXED`, as do `refs`, `mentions`, `structure`, and `reset`/`compare` on it; `symbols()` answers `{ ok: false, code: 'OKCODE_NOT_INDEXED' }`; every edit is refused (`OKCODE_READ_ONLY`). `status()` and `workspaces()` list it with `index: 'none'`, `env: null`.
+- Text is read up to `textMax` (default 32 MB here; the index's own cap, 512 KB, elsewhere). An id an indexed workspace holds is refused (`OKCODE_WORKSPACE_EXISTS`). The default, `index: 'full'`, is unchanged.
+
+**Documents — sections, not chunks.** A file with no symbols that is not code (markdown, plain text, HTML, JSON, logs — `analysis.regions(path, text)`) is outlined as titled **sections** (`by: 'section'`): `[{ kind: 'heading' | 'section' | 'paragraph' | 'member' | 'page' | 'lines', title, lineStart, lineEnd, level? }]` — markdown/HTML headings (nested: a heading's section holds its subsections; fenced code is not a heading; text before the first heading is a `section`), a JSON document's top-level members (array elements grouped up to 80 lines), pages of an extracted text (form feeds), prose paragraphs merged up to 80 lines, and runs of 200 lines through a long block without blank lines (a log). Each is addressed by range; a heading also by title: `read('guide.md#Install')` reads that whole section (matched as written, then ignoring case and leading `#`s; a title two headings share is ambiguous, with both ranges). Code without symbols keeps its chunks. In an indexed workspace `file#name` is still a symbol first; a heading only when no symbol has that name.
+
+Notes: `reset('fts')` needs the workspace **open** in this process (the content index reads through its access facade); `'vectors'` works from any process. `sync()` returns `[{ id, scanned, changed, removed, ms }]`. `compare()` returns raw per-profile vector hits (not the merged `ask` results, which would hide the differences). Error codes: `OKCODE_UNKNOWN_WORKSPACE`, `OKCODE_WORKSPACE_NOT_OPEN`, `OKCODE_UNKNOWN_EMBEDDER`, `OKCODE_EMBEDDER_EXISTS`, `OKCODE_NEEDS_CONFIG`, `OKCODE_NEEDS_ID`, `OKCODE_UNKNOWN_EMBEDDER_TYPE`, `OKCODE_NO_EMBEDDINGS`, `OKCODE_DIMS_MISMATCH`, `OKCODE_IDENTITY_MISMATCH`, `OKCODE_BAD_QUERY`, `OKCODE_NOT_INDEXED`, `OKCODE_WORKSPACE_EXISTS`; an edit result's `code: 'OKCODE_READ_ONLY'`.
 
 **Persistence** (okdb env `okcode`): `workspaces` (id → env, added, lastSync, access kind/root), `embedders` (name → provider/fields (url, model)/dims, a custom profile's `id`, never a function or a function-sourced secret; a profile whose function was not re-supplied on open reports `needs-config`), `settings` (`active`).
 
@@ -154,7 +166,8 @@ Notes: `reset('fts')` needs the workspace **open** in this process (the content 
 
 ## 10. What the host keeps (the brain, for example)
 
-- Which workspaces exist and where (workspace memories → `addWorkspace(key, { access })`), including building the facade: local → `localFs`, remote machine → `shell({ run: sshDriver })`.
+- Which workspaces exist and where (workspace memories → `addWorkspace(key, { access })`), including building the facade: local → `localFs`, remote machine → `shell({ run: sshDriver })`; material it only wants navigated (a task's kept reads) → `addWorkspace(id, { access: fn(…), index: 'none' })`.
+- Labels, lifetime and provenance of what it hands okcode: okcode knows nothing of sensitivity or retention; a custom embedder learns only the workspace id (§8) and maps it to the host's own label.
 - When to sync (cycle open), secrets (`apiKey` functions), recording stats in its own memory.
 - Licensing (§5): the host supplies the license — `open({ path, license })`, or on its own `db` when it passes one. The brain's existing `OKDB_LICENSE_FILE` (inherited by its child processes) already covers okcode's store: okdb installs it at every open, with no okcode code.
 - Its model-facing tool names/policy (it may use `okcode/tools` renderers or its own).

@@ -28,6 +28,13 @@
 // license needs a one-time activation: okcode does not fail — status().license
 // reports { status: 'needs-activation', pin }.
 //
+// UNINDEXED WORKSPACES. `addWorkspace(id, { access, index: 'none' })` opens a
+// workspace that okcode serves straight from its facade (library mode for the
+// whole of it: src/workspace.js) and never indexes: no env, no store, no
+// registry record, no vectors — it exists only in this process, for as long
+// as the host keeps it added. ask(), reset() and compare() refuse it
+// (OKCODE_NOT_INDEXED); every edit is refused (OKCODE_READ_ONLY).
+//
 // ONE INSTANCE PER PATH PER PROCESS. `open({ path })` opens okcode's own
 // okdb; a host that already holds an okdb on that path must pass `db`
 // instead (two instances on one path in one process deadlock natively).
@@ -197,7 +204,7 @@ async function open({
     }
 
     // ── workspaces ──────────────────────────────────────────────────────
-    // id -> { ws, store, access, options }
+    // id -> { ws, store, access, options, index } — store null for index 'none'
     const opened = new Map();
 
     const regGet = (id) => meta.get(T_WS, id) || null;
@@ -217,6 +224,7 @@ async function open({
     // process): null when it does not exist.
     async function envOf(id) {
         const o = opened.get(id);
+        if (o && !o.store) return null; // unindexed: never an env
         if (o) return o.store.env;
         try {
             return await db.openEnv(envNameFor(id));
@@ -255,6 +263,15 @@ async function open({
             );
         }
         return o;
+    }
+
+    const isUnindexed = (id) => {
+        const o = opened.get(id);
+        return !!(o && o.index === 'none');
+    };
+    function refuseUnindexed(id, what) {
+        if (isUnindexed(id))
+            throw codedError(`workspace "${id}" is not indexed — ${what} needs an index`, 'OKCODE_NOT_INDEXED');
     }
 
     // The profile name an ask() resolves to: an explicit one must exist and
@@ -297,7 +314,7 @@ async function open({
             if (!store.hasProfiles()) return innerAsk(query, opts); // its own "unavailable" error
             return innerAsk(query, { ...opts, profile: resolveProfile(opts.profile) });
         };
-        opened.set(id, { ws, store, access, options });
+        opened.set(id, { ws, store, access, options, index: 'full' });
         return { ws, store };
     }
 
@@ -311,14 +328,35 @@ async function open({
         };
     }
 
-    async function addWorkspace(id, { access, options = {} } = {}) {
+    async function addWorkspace(id, { access, options = {}, index = 'full' } = {}) {
         envNameFor(id); // validates the id
         if (!access || typeof access.read !== 'function')
             throw new Error(`addWorkspace("${id}") needs an access facade`);
+        if (index !== 'full' && index !== 'none') {
+            throw new Error(`addWorkspace("${id}"): index must be 'full' or 'none' (got ${JSON.stringify(index)})`);
+        }
+        // An indexed workspace keeps its env and record; serving it unindexed
+        // under the same id would hide both.
+        if (index === 'none' && regGet(id)) {
+            throw codedError(
+                `workspace "${id}" is an indexed workspace — pick another id for an unindexed one`,
+                'OKCODE_WORKSPACE_EXISTS',
+            );
+        }
         const prior = opened.get(id);
         if (prior) {
             await prior.ws.close().catch(() => {});
             opened.delete(id);
+        }
+        if (index === 'none') {
+            const ws = await openWorkspace({
+                id,
+                access,
+                store: null,
+                options: { ...(workspaceDefaults || {}), ...(options || {}), index: 'none' },
+            });
+            opened.set(id, { ws, store: null, access, options, index: 'none' });
+            return ws;
         }
         const now = Date.now();
         const existing = regGet(id);
@@ -352,7 +390,14 @@ async function open({
             seen.add(r.id);
             out.push({ ...r, open: opened.has(r.id) });
         }
-        for (const id of opened.keys()) if (!seen.has(id)) out.push({ id, env: envNameFor(id), open: true });
+        for (const [id, o] of opened) {
+            if (seen.has(id)) continue;
+            out.push(
+                o.index === 'none'
+                    ? { id, env: null, index: 'none', open: true }
+                    : { id, env: envNameFor(id), open: true },
+            );
+        }
         return out.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
     }
 
@@ -363,6 +408,7 @@ async function open({
             await o.ws.close().catch(() => {});
             opened.delete(id);
         }
+        if (o && o.index === 'none') return { id, removed: true }; // nothing was ever stored
         await dropEnv(id, o ? o.store : null);
         if (regGet(id)) await meta.remove(T_WS, id);
         return { id, removed: known };
@@ -379,8 +425,10 @@ async function open({
             const t0 = Date.now();
             const r = await o.ws.sync({ force });
             const res = syncResult(wid, r, Date.now() - t0);
-            await regPatch(wid, { lastSync: Date.now(), lastScan: res });
-            await learnDims(o.store);
+            if (o.store) {
+                await regPatch(wid, { lastSync: Date.now(), lastScan: res });
+                await learnDims(o.store);
+            }
             out.push(res);
         }
         return out;
@@ -486,6 +534,20 @@ async function open({
     async function workspaceStatus(id) {
         const reg = regGet(id);
         const o = opened.get(id);
+        if (o && o.index === 'none') {
+            return {
+                id,
+                env: null,
+                index: 'none',
+                open: true,
+                lastSync: null,
+                files: 0,
+                symbols: 0,
+                fts: {},
+                embedders: [],
+                orphaned: [],
+            };
+        }
         const env = await envOf(id);
         const out = {
             id,
@@ -588,6 +650,7 @@ async function open({
 
     async function reset(id, { scope = 'vectors', embedder = null } = {}) {
         assertKnown(id);
+        refuseUnindexed(id, 'reset()');
         if (scope === 'vectors') {
             const env = await envOf(id);
             if (!env) return { id, scope, rebuilt: [] };
@@ -669,6 +732,7 @@ async function open({
         }
         const results = [];
         for (const [id, o] of opened) {
+            if (!o.store) continue; // unindexed: never embedded
             const st = await o.store.addProfile(entry.profile);
             results.push({
                 id,
@@ -678,7 +742,7 @@ async function open({
                 pending: st.pending || null,
             });
         }
-        for (const o of opened.values()) await learnDims(o.store);
+        for (const o of opened.values()) if (o.store) await learnDims(o.store);
         return { name, workspaces: results };
     }
 
@@ -748,6 +812,7 @@ async function open({
     // profile refuses a mismatch).
     async function compare(id, query, names = null, { limit = 8, text = false } = {}) {
         const o = requireOpen(id, 'compare');
+        refuseUnindexed(id, 'compare()');
         const list = names == null ? usable().map((p) => p.name) : Array.isArray(names) ? names : [names];
         const out = {};
         for (const n of list) {

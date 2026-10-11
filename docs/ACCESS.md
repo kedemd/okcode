@@ -2,7 +2,7 @@
 
 okcode never touches a filesystem or opens a connection itself. Every byte in or out of a workspace goes through an **access facade** — an object the host supplies when it adds a workspace. The facade is the whole contract between okcode and "where the files are".
 
-okcode ships two implementations (`okcode.access.localFs`, `okcode.access.shell`); anything else — a remote API, an in-memory fixture — implements the same shape.
+okcode ships four implementations (`okcode.access.localFs`, `okcode.access.shell`, and the read-only `okcode.access.fn` and `okcode.access.memory`); anything else — a remote API, an in-memory fixture — implements the same shape.
 
 ## Conventions
 
@@ -30,9 +30,9 @@ Metadata for named files; `hash: true` adds the content hash. A path that is abs
 
 Contents of named files. A missing or unreadable file is simply absent from the result.
 
-### `commit(path, bytes, { expectedHash = null, create = false }) → { outcome, hash?, current? , error? }`
+### `commit(path, bytes, { expectedHash = null, create = false }) → { outcome, hash?, current? , error? }` — optional
 
-The only write. Atomic for one file: readers see the old bytes or the new bytes, never a mix.
+The only write. **Optional:** a facade without `commit` is **read-only** — okcode finds, reads, greps and outlines through it as usual, and refuses every edit (`editBatch`, `edit`, `writeAt`, `writeWholeFile`) before resolving anything, with `{ ok: false, readOnly: true, code: 'OKCODE_READ_ONLY', reason }`. An unindexed workspace (`index: 'none'`) is read-only whatever its facade has. Atomic for one file: readers see the old bytes or the new bytes, never a mix.
 
 | call              | behaviour                                                             |
 | ----------------- | --------------------------------------------------------------------- |
@@ -74,6 +74,14 @@ A pre-filter for grep: which of `paths` contain the literal `text` (one line, no
 Delete files (best effort). Not used by edits today; reserved for file deletion verbs.
 
 ## The shipped facades
+
+### `okcode.access.fn({ list, read, stat? })` — read-only
+
+A facade over the host's own functions, for material that is not a folder anywhere (the brain's kept reads). `list(opts)` returns `[{ path, size, mtime }]` (it may ignore `opts`); `read(paths)` returns a `Map` or a plain object of `path → Buffer | string`; `stat(paths, { hash })`, when given, answers as the contract's `stat`, and when absent is derived from one `list()` (plus a `read` for hashes, taken here). The facade does the rest of the contract itself: paths are checked (posix dialect, `checkPath` exposed), a listing is confined to `under`, skip names and dot-directories are pruned below it, `limit` is honoured (`truncated: true`), and text comes back as Buffers. No `commit`, `lock`, `exec` or `remove`.
+
+### `okcode.access.memory(map)` — read-only
+
+`fn` over a `Map<path, { bytes, mtime }>` (`bytes` a Buffer or a string; a bare Buffer or string is taken as `{ bytes, mtime: 0 }`). Read live: entries the host adds or replaces are seen on the next call.
 
 ### `okcode.access.localFs(root)`
 

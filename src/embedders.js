@@ -4,7 +4,7 @@
 // A profile is what the host configures under a name:
 //
 //   { type: 'ollama' | 'openai' | <any okdb factory type>, model, url?, apiKey?, dims?, ...providerFields }
-//   { embed: async (text | texts) => vector(s), id, embedBatch?, dims?, model? }    // custom
+//   { embed: async (text | texts, { workspace }) => vector(s), id, embedBatch?, dims?, model? }    // custom
 //
 // and what okdb needs is an embedder CONFIG — a plain, persistable object whose
 // `type` names a factory registered on the okdb instance. Two things in a
@@ -70,28 +70,37 @@ function baseFactory(db, type) {
 // `embed(text)` for single inputs and `embedBatch(texts)` when present; the
 // host's function may be written either way ("texts in, vectors out" or one
 // text in, one vector out), so both shapes are accepted on the way back.
+//
+// CONTEXT. The host's function is called as `embed(texts, { workspace })`:
+// one profile embeds for every workspace, and which one's text this is (its
+// id; null for an engine not tied to one) is what a host needs to decide
+// where that text may go. The store puts the id in each workspace's embedder
+// config (src/store.js); a function that takes one argument ignores it.
 function customFactory(profile) {
     const hostEmbed = profile.embed;
     const hostBatch = typeof profile.embedBatch === 'function' ? profile.embedBatch : null;
-    return () => ({
-        async embed(input) {
-            if (Array.isArray(input)) return this.embedBatch(input);
-            const out = await hostEmbed(input);
-            return toVector(isBatch(out) ? out[0] : out);
-        },
-        async embedBatch(texts) {
-            const out = hostBatch ? await hostBatch(texts) : await hostEmbed(texts);
-            if (isBatch(out) && out.length === texts.length) return out.map(toVector);
-            if (texts.length === 1 && isVectorLike(out) && !isBatch(out)) return [toVector(out)];
-            // The host's function is one-text-at-a-time after all.
-            const each = [];
-            for (const t of texts) {
-                const v = await hostEmbed(t);
-                each.push(toVector(isBatch(v) ? v[0] : v));
-            }
-            return each;
-        },
-    });
+    return (config) => {
+        const ctx = Object.freeze({ workspace: (config && config.workspace) || null });
+        return {
+            async embed(input) {
+                if (Array.isArray(input)) return this.embedBatch(input);
+                const out = await hostEmbed(input, ctx);
+                return toVector(isBatch(out) ? out[0] : out);
+            },
+            async embedBatch(texts) {
+                const out = hostBatch ? await hostBatch(texts, ctx) : await hostEmbed(texts, ctx);
+                if (isBatch(out) && out.length === texts.length) return out.map(toVector);
+                if (texts.length === 1 && isVectorLike(out) && !isBatch(out)) return [toVector(out)];
+                // The host's function is one-text-at-a-time after all.
+                const each = [];
+                for (const t of texts) {
+                    const v = await hostEmbed(t, ctx);
+                    each.push(toVector(isBatch(v) ? v[0] : v));
+                }
+                return each;
+            },
+        };
+    };
 }
 
 // The okdb factory for a built-in provider whose api key is a FUNCTION. The

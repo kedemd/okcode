@@ -38,6 +38,10 @@ module.exports = {
     listExtensions: extensions.listExtensions,
     // symbol-aware chunking for embeddings (namespaced)
     chunk,
+    // the titled outline of a text without symbols (headings, members, pages,
+    // paragraphs, line runs) and the section one heading names
+    regions: chunk.regions,
+    sectionOf: chunk.sectionOf,
     // template balance (namespaced: `check` alone says nothing)
     templateBalance,
     checkTemplateBalance: templateBalance.check,

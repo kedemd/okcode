@@ -29,10 +29,11 @@ const { scanPackages, readPackages } = require('./analysis/packages');
 const { validateSourceAsync, compareDiagnostics } = require('./analysis/validate');
 const { paletteFrom } = require('./analysis/convention-color');
 const textUtil = require('./analysis/text');
-const { chunkCode } = require('./analysis/chunk');
+const { chunkCode, regions: textRegions, sectionOf } = require('./analysis/chunk');
 const { quoteLines, asQuery } = require('./store');
 const { compileMatcher, matchText, tallyText, pathMatcher } = require('./grep');
 const { DEFAULT_SKIP } = require('./access/common');
+const { TEXT_MAX } = require('./analysis/parse');
 
 const DEFAULTS = {
     // A whole-file read is capped by LINES, not bytes: a truncated read must
@@ -73,7 +74,19 @@ const DEFAULTS = {
     libraryFiles: 20000,
     libraryParseFiles: 2000,
     libraryScans: 4,
+    // 'full' (indexed: the walk, the store, full-text and vectors) or 'none':
+    // the WHOLE workspace is served the way library code is — listed, read and
+    // matched straight from the facade on every call, outlined and looked up
+    // by name from an in-memory parse, nothing walked at open, nothing stored,
+    // never embedded; ask() refuses (OKCODE_NOT_INDEXED) and so does every
+    // edit. For a host's read-only material it never wants indexed.
+    index: 'full',
+    // The largest file read as text by path (library code and an unindexed
+    // workspace); null = the index's own cap (TEXT_MAX). An unindexed
+    // workspace holds what a host chose to keep, so it defaults higher.
+    textMax: null,
 };
+const NONE_TEXT_MAX = 32 * 1024 * 1024;
 // A leftover sliver of a carved region — the `};` between a template and a
 // style block — is not a piece anyone wants offered. An outline is a menu, not
 // a partition: everything stays reachable by explicit range regardless.
@@ -259,10 +272,23 @@ function parseRange(query) {
 
 async function openWorkspace({ id, access, store = null, options = {} } = {}) {
     if (typeof id !== 'string' || !id) throw new Error('openWorkspace needs an id');
-    for (const m of ['list', 'stat', 'read', 'commit']) {
+    for (const m of ['list', 'stat', 'read']) {
         if (!access || typeof access[m] !== 'function') throw new Error(`openWorkspace: access.${m}() is required`);
     }
     const opts = { ...DEFAULTS, ...(options || {}) };
+    if (opts.index !== 'full' && opts.index !== 'none') {
+        throw new Error(`openWorkspace: index must be 'full' or 'none' (got ${JSON.stringify(opts.index)})`);
+    }
+    // UNINDEXED: everything below that walks, records or embeds is skipped,
+    // and every path is library-shaped (libraryPath). A store is never used.
+    const unindexed = opts.index === 'none';
+    if (unindexed) store = null;
+    // A facade without commit is read-only (docs/ACCESS.md): every edit is
+    // refused before anything is resolved, with a code the host can test.
+    const readOnly = unindexed || typeof access.commit !== 'function';
+    const textMax = opts.textMax || (unindexed ? NONE_TEXT_MAX : TEXT_MAX);
+    // isTextual with this workspace's size cap, for files read by path.
+    const textualByPath = (p, size) => isTextual(p, 0) && (!size || size <= textMax);
 
     // rel -> { path, rel, size, mtime, hash, lang, lines, symbols, imports,
     //          exports, parsed, indexed, reason, lossless, analyzerVersion,
@@ -774,6 +800,8 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
     let opened = false;
     let scanning = null;
     async function refresh({ force = false, rewrite = false, sync = false, rehash = false } = {}) {
+        // Nothing to walk: an unindexed workspace is read fresh on every call.
+        if (unindexed) return { scanned: 0, reparsed: 0, removed: 0, unindexed: true };
         const explicit = force || sync || rewrite || rehash;
         if (scanning) {
             await scanning.catch(() => {});
@@ -1059,8 +1087,19 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
     // null = not a library path; { rel } = cleaned and addressable;
     // { error } = a library path the facade refuses (`..`, absolute). A
     // dot-directory is working state (.git), never a library: null.
+    //
+    // UNINDEXED, every path is library-shaped, the root included (rel ''):
+    // there is no index to address anything through.
     function libraryPath(p) {
         const raw = normPath(p);
+        if (unindexed) {
+            if (!raw) return { rel: '' };
+            try {
+                return { rel: typeof access.checkPath === 'function' ? access.checkPath(raw) : raw };
+            } catch (err) {
+                return { error: String((err && err.message) || err) };
+            }
+        }
         if (!raw) return null;
         const segs = raw.split('/');
         if (!segs.some((x) => skipNames.has(x) && !x.startsWith('.'))) return null;
@@ -1092,7 +1131,9 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
     // search actually looked.
     async function listLibrary(roots, cap) {
         const uniq = [...new Set(roots)];
-        const tops = uniq.filter((r) => !uniq.some((o) => o !== r && r.startsWith(`${o}/`)));
+        // '' is the root (an unindexed workspace): it holds every other root.
+        const inside = (p, root) => root === '' || p === root || p.startsWith(`${root}/`);
+        const tops = uniq.includes('') ? [''] : uniq.filter((r) => !uniq.some((o) => o !== r && r.startsWith(`${o}/`)));
         const seen = new Map();
         let truncated = false;
         let listedN = 0;
@@ -1105,19 +1146,19 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
             }
             let listed;
             try {
-                listed = await access.list({ under: root, skip: ['node_modules'], limit: left });
+                listed = await access.list({ ...(root ? { under: root } : {}), skip: ['node_modules'], limit: left });
             } catch (err) {
                 throw badPath(`${root}: ${String((err && err.message) || err)}`);
             }
             if (listed.truncated) truncated = true;
             listedN += listed.length;
-            if (!listed.some((r) => r.path === root || r.path.startsWith(`${root}/`))) missing.push(root);
+            if (root && !listed.some((r) => inside(r.path, root))) missing.push(root);
             for (const r of listed) {
                 // A facade that ignores `under` hands back the whole tree:
                 // only the subtree counts, whatever arrived.
-                if (r.path !== root && !r.path.startsWith(`${root}/`)) continue;
+                if (!inside(r.path, root)) continue;
                 if (/(^|\/)\.[^/]+\//.test(r.path) || OWN_TRANSIENT.test(r.path)) continue;
-                if (!isTextual(r.path, r.size) || isSecret(r.path)) continue;
+                if (!textualByPath(r.path, r.size) || isSecret(r.path)) continue;
                 seen.set(r.path, { rel: r.path, size: r.size, mtime: r.mtime });
             }
         }
@@ -1130,6 +1171,13 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
     // the facade's confinement — lexical and by real path — decides whether
     // it may be read at all; a symlink out of the root is refused there.
     async function libraryFile(rel) {
+        if (!rel) {
+            return {
+                ok: false,
+                isDir: true,
+                reason: 'that is the whole workspace — outline it for its files, or grep it',
+            };
+        }
         let listed;
         try {
             listed = await access.list({ under: rel, skip: [], limit: 1 });
@@ -1150,7 +1198,7 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
                   };
         }
         if (isSecret(rel)) return { ok: false, reason: `${rel} may hold credentials — never read` };
-        if (!isTextual(rel, row.size))
+        if (!textualByPath(rel, row.size))
             return { ok: false, reason: `${rel} is not readable as text (binary or oversized)` };
         const buf = (await access.read([rel])).get(rel);
         if (!buf) return { ok: false, reason: `${rel} could not be read` };
@@ -1165,6 +1213,12 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
     // them, and a stale outline would be worse than none. Never written to the
     // store, never embedded, never full-text indexed; no text is kept.
     const libraryScans = new Map();
+    // An unindexed workspace is mostly documents: their headings are the names
+    // find() looks up and a folder outline lists.
+    const headingNames = (rel, text) =>
+        (textRegions(rel, text) || [])
+            .filter((g) => g.kind === 'heading')
+            .map((g) => ({ name: g.title, path: g.title, kind: 'heading', lineStart: g.lineStart, lineEnd: g.lineEnd }));
     async function scanLibrary(root) {
         const listed = await listLibrary([root], Math.max(1, opts.libraryParseFiles));
         const prior = libraryScans.get(root) || new Map();
@@ -1187,8 +1241,9 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
                 const buf = got.get(r.rel);
                 if (!buf) continue;
                 let x;
+                const text = textUtil.decode(buf).text;
                 try {
-                    x = extract(r.rel, textUtil.decode(buf).text);
+                    x = extract(r.rel, text);
                 } catch {
                     continue;
                 }
@@ -1197,7 +1252,7 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
                     mtime: r.mtime,
                     lines: x.lines,
                     lang: x.lang,
-                    symbols: x.symbols || [],
+                    symbols: (x.symbols || []).length || !unindexed ? x.symbols || [] : headingNames(r.rel, text),
                 });
             }
         }
@@ -1229,9 +1284,12 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
             const byPath = syms.filter((x) => (x.path || x.name) === symbol);
             const hits = byPath.length ? byPath : syms.filter((x) => x.name === symbol);
             if (!hits.length) {
+                // Not a symbol: perhaps a heading (`README.md#Install`).
+                const sec = readSection(rel, got.text, got.at, symbol, { library: true });
+                if (sec) return sec;
                 return {
                     ok: false,
-                    reason: `${rel} has no symbol "${symbol}" — outline it for its names, or read a range "${rel}:<from>-<to>"`,
+                    reason: `${rel} has no symbol or heading "${symbol}" — outline it for its names, or read a range "${rel}:<from>-<to>"`,
                 };
             }
             if (hits.length > 1) {
@@ -1291,6 +1349,65 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
         };
     }
 
+    // The read of one heading's section (`file#Title`), from text already in
+    // hand: a read result, an ambiguity (with each candidate's range), or null
+    // when no heading has that title.
+    function readSection(rel, text, at, title, extra = {}) {
+        const sec = sectionOf(rel, text, title);
+        if (!sec) return null;
+        if (sec.ambiguous) {
+            return {
+                ok: false,
+                ambiguous: true,
+                reason: `"${title}" heads ${sec.ambiguous.length} sections in ${rel} — read one by range`,
+                candidates: sec.ambiguous.map((g) => `${rel}:${g.lineStart}-${g.lineEnd}`),
+            };
+        }
+        const lines = text.split('\n');
+        return {
+            ok: true,
+            ...extra,
+            name: sec.title,
+            kind: 'heading',
+            file: rel,
+            path: sec.title,
+            parent: null,
+            lineStart: sec.lineStart,
+            lineEnd: sec.lineEnd,
+            lines: lines.length,
+            at,
+            body: lines.slice(sec.lineStart - 1, sec.lineEnd).join('\n'),
+        };
+    }
+
+    // The outline of a text with no symbols (analysis/chunk.js regions):
+    // `by: 'section'`, each piece addressed by range — a heading by its title
+    // too, unless another heading has the same one. null for code, which
+    // falls back to chunks.
+    function sectionsOutline(rel, text, limit) {
+        const all = textRegions(rel, text);
+        if (!all || !all.length) return null;
+        const seen = new Map();
+        for (const g of all) if (g.kind === 'heading') seen.set(g.title, (seen.get(g.title) || 0) + 1);
+        return {
+            by: 'section',
+            total: all.length,
+            truncated: all.length > limit,
+            symbols: all.slice(0, limit).map((g) => ({
+                name: g.title,
+                path: g.kind === 'heading' && seen.get(g.title) === 1 ? `${rel}#${g.title}` : `${rel}:${g.lineStart}-${g.lineEnd}`,
+                kind: g.kind,
+                parent: null,
+                ...(g.level ? { level: g.level } : {}),
+                lineStart: g.lineStart,
+                lineEnd: g.lineEnd,
+                span: g.lineEnd - g.lineStart + 1,
+                signature: null,
+                doc: null,
+            })),
+        };
+    }
+
     // outline() of a library path. A FILE: its symbols (or, with none, its
     // chunks), parsed in memory from one direct read. A DIRECTORY: the
     // subtree's files with their top-level symbols, from scanLibrary — the
@@ -1326,6 +1443,8 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
                     })),
                 };
             }
+            const sections = sectionsOutline(one.rel, one.text, limit);
+            if (sections) return { ...head, ...sections };
             const before = (n) => one.text.slice(0, n).split('\n').length;
             const cut = [];
             for (const c of chunkCode(one.text, one.rel)) {
@@ -1365,7 +1484,7 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
             ok: true,
             library: true,
             by: 'files',
-            dir: lib.rel,
+            dir: lib.rel || '.',
             total: scan.files.length,
             lines: scan.files.reduce((n, f) => n + (f.lines || 0), 0),
             symbolCount: scan.files.reduce((n, f) => n + f.symbols.length, 0),
@@ -1413,7 +1532,9 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
         // listLibrary). Without one, nothing below differs from a plain grep:
         // library code never floods a normal search. Globs never reach into
         // a skipped directory — only a path names one.
-        const named = [].concat(o.paths == null ? [] : o.paths).map((p) => [p, libraryPath(p)]);
+        // Unindexed, no paths = the whole workspace, as one library root.
+        const given = [].concat(o.paths == null ? [] : o.paths);
+        const named = (unindexed && !given.length ? [''] : given).map((p) => [p, libraryPath(p)]);
         const libRoots = named.filter(([, l]) => l);
         let universe;
         let rels;
@@ -2061,10 +2182,34 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
 
     const scanSkipped = () => [...scanWarnings].map(([file, reason]) => ({ file, reason }));
 
+    // What an unindexed workspace cannot answer: the verbs that exist only
+    // over an index (by meaning, uses, the graph's aggregates).
+    const notIndexed = (what) => {
+        const err = new Error(
+            `workspace "${id}" is not indexed — ${what} needs an index; grep it, outline a file, or read by path, range or heading`,
+        );
+        err.code = 'OKCODE_NOT_INDEXED';
+        return err;
+    };
+    // An edit on a read-only workspace (unindexed, or a facade without
+    // commit): refused before anything is resolved, in the result shape every
+    // edit verb returns.
+    const readOnlyRefusal = () => ({
+        ok: false,
+        readOnly: true,
+        code: 'OKCODE_READ_ONLY',
+        reason: unindexed
+            ? `workspace "${id}" is read-only (not indexed) — nothing in it can be edited`
+            : `workspace "${id}" is read-only (its access facade has no commit) — nothing in it can be edited`,
+    });
+
     const api = {
         id,
         access,
         store,
+        // 'full' | 'none' (DEFAULTS.index), and whether any edit is refused.
+        index: opts.index,
+        readOnly,
         refresh,
         // Files the last tree walk found but could not take in, with why.
         scanWarnings: scanSkipped,
@@ -2077,6 +2222,7 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
 
         // ── structure ───────────────────────────────────────────────────
         async structure({ dir = null } = {}) {
+            if (unindexed) throw notIndexed('structure()');
             await ensureOpen();
             const prefix = dir ? String(dir).replace(/\\/g, '/') : null;
             const all = list().filter((f) => !prefix || f.rel.startsWith(prefix));
@@ -2184,7 +2330,7 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
             // prose) in that subtree's in-memory scan (scanLibrary) — never
             // by meaning, never through the store, which holds none of it.
             // A project path filters the ordinary answer.
-            if (path != null && path !== '') {
+            if (unindexed || (path != null && path !== '')) {
                 const lib = libraryPath(path);
                 if (lib) {
                     if (lib.error) throw badPath(`${path}: ${lib.error}`);
@@ -2396,6 +2542,7 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
         // need words: with a vector and no text the answer is semantic only;
         // with both, the three eyes fuse exactly as for a string.
         async ask(query, { limit = 12, profile = null, path = null } = {}) {
+            if (unindexed) throw notIndexed('searching by meaning');
             // Library code has no vectors by design (never embedded): say so
             // rather than answer from the project as if the scope held.
             if (path != null && path !== '' && libraryPath(path)) {
@@ -2489,13 +2636,33 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
 
         // [{ file, size, lines, lang, symbols, indexed, hash }] under `dir`.
         async files({ dir = null, lang = null, limit = 0, stat = false } = {}) {
-            await ensureOpen();
             // A directory, not a string prefix: `lib` lists lib/, not libs/.
             const d = String(dir || '')
                 .replace(/\\/g, '/')
                 .replace(/^\.(\/|$)/, '')
                 .replace(/^\/+|\/+$/g, '');
             const prefix = d ? `${d}/` : null;
+            // Unindexed: a fresh listing (one facade call) — no rows, so no
+            // line or symbol counts.
+            if (unindexed) {
+                const lib = libraryPath(d);
+                if (lib.error) throw badPath(`${d}: ${lib.error}`);
+                const listed = await listLibrary([lib.rel], Math.max(1, opts.libraryFiles));
+                let all = listed.rows.filter((r) => !lang || langOf(r.rel) === lang);
+                const total = all.length;
+                if (limit > 0) all = all.slice(0, limit);
+                const rows = all.map((r) => ({
+                    file: r.rel,
+                    size: r.size == null ? null : r.size,
+                    lines: null,
+                    lang: langOf(r.rel),
+                    symbols: null,
+                    indexed: false,
+                    hash: null,
+                }));
+                return { id, dir: prefix, total, truncated: rows.length < total || listed.truncated, asOf: Date.now(), files: rows };
+            }
+            await ensureOpen();
             let all = list()
                 .filter((f) => !prefix || f.rel.startsWith(prefix))
                 .filter((f) => !lang || f.lang === lang)
@@ -2521,6 +2688,7 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
         // template/style pieces) and no chunk fallback for a file without
         // symbols — outline() carves those from the text.
         async symbols(filePath, { limit = 0, kind = null, stat = false } = {}) {
+            if (unindexed) return { ok: false, code: 'OKCODE_NOT_INDEXED', reason: notIndexed('symbols()').message };
             await ensureOpen();
             const f = fileOf(filePath);
             if (!f) {
@@ -2666,6 +2834,10 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
             // says which path answered.
             if (!syms.length) {
                 const src = String((await textOfFresh(fresh.path)) || '');
+                // A document (markdown, prose, JSON, a log): its titled
+                // sections. Code without symbols: chunks, below.
+                const sections = sectionsOutline(fresh.rel, src, limit);
+                if (sections) return { ok: true, file: fresh.rel, lines: fresh.lines, at: fresh.hash, ...sections };
                 const before = (n) => src.slice(0, n).split('\n').length;
                 const all = src.split('\n');
                 // A chunk is not automatically small: an unbounded chunk in
@@ -2711,6 +2883,7 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
         // or an attribute value is not a symbol. RESULT-SET CHECK: only the
         // files about to back a hit are stat-checked; a change re-runs once.
         async mentions(text, { limit = 5 } = {}, _retried = false) {
+            if (unindexed) throw notIndexed('mentions()');
             await ensureOpen();
             const hits = await mentionsOf(text, limit);
             if (!_retried && hits.length && (await resultSetCheck(hits.map((h) => h.rel))).changed) {
@@ -2775,7 +2948,15 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
             const m = pathMatcher({ glob: pats });
             const ready = indexReady();
             let rows;
-            if (ready) {
+            if (unindexed) {
+                rows = (await listLibrary([''], Math.max(1, opts.libraryFiles))).rows.map((r) => ({
+                    file: r.rel,
+                    size: r.size == null ? null : r.size,
+                    lines: null,
+                    lang: langOf(r.rel),
+                    indexed: false,
+                }));
+            } else if (ready) {
                 await ensureOpen();
                 rows = list().map((f) => ({
                     file: f.rel,
@@ -2817,6 +2998,7 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
         // a place you can then read or edit by name. Labelled `textual`: a
         // name in a comment or a string counts here.
         async refs(query, { limit = 40, includeSelf = false } = {}, _retried = false) {
+            if (unindexed) throw notIndexed('finding uses');
             await ensureOpen();
             // isSecret as well as the flag: a store written under older rules
             // can still hold `indexed: true` for a file that must not be read.
@@ -2872,13 +3054,25 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
             // likely a symbol's name than a whole library folder.
             const cut = String(query).indexOf('#');
             const head = cut > 0 ? String(query).slice(0, cut) : String(query);
-            const lib = /[\\/]/.test(head) ? libraryPath(head) : null;
+            // Unindexed, every name is a path: there is no index of symbols.
+            const lib = unindexed || /[\\/]/.test(head) ? libraryPath(head) : null;
             if (lib) {
                 if (lib.error) return { ok: false, reason: lib.error };
                 return readLibrary(lib.rel, { from, to, symbol: cut > 0 ? String(query).slice(cut + 1) : null });
             }
             await ensureOpen();
             const r = await resolve(query);
+            // `file#Title`: not a symbol, but perhaps a heading of that file.
+            if (!r.ok && !r.ambiguous && cut > 0 && !from && !to) {
+                const f = fileOf(head);
+                if (f && f.indexed !== false) {
+                    await verify([f.path]);
+                    const cur = files.get(f.path);
+                    const src = cur ? await textOfFresh(cur.path) : null;
+                    const sec = typeof src === 'string' ? readSection(cur.rel, src, (files.get(f.path) || cur).hash, String(query).slice(cut + 1)) : null;
+                    if (sec) return sec;
+                }
+            }
             // Not a symbol, but a file the index knows — serve it rather than
             // sending the caller to the shell for bytes we can reach.
             if (!r.ok && !r.isFile && (from || to)) {
@@ -3006,6 +3200,7 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
         // new occurrence. find/ask locate; only a precise read establishes the
         // snapshot an edit may target.
         async editBatch({ at = null, edits = [] } = {}) {
+            if (readOnly) return readOnlyRefusal();
             const todo = Array.isArray(edits) ? edits.filter(Boolean) : [];
             if (!todo.length) return { ok: false, reason: 'editBatch needs at least one edit' };
             if (!at) {
@@ -3296,6 +3491,7 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
         // spanning the whole file, with the exact same snapshot/validate/
         // commit/readback guarantees as any other edit.
         async writeWholeFile(relPath, text, { expectedHash = null, create = false } = {}) {
+            if (readOnly) return readOnlyRefusal();
             await ensureOpen();
             if (!create) {
                 if (!expectedHash) {
@@ -3411,6 +3607,7 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
                 id,
                 access: access.kind || null,
                 store: store ? store.envName : null,
+                index: opts.index,
                 lastScanAt,
                 files: all.length,
                 symbols: all.reduce((a, f) => a + (f.symbols || []).length, 0),

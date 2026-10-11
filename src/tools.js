@@ -817,7 +817,13 @@ function createTools({ workspace, workspaces = () => [], grepMaxChars = 12000 } 
             );
         }
         const what =
-            o.by === 'region' ? 'structural regions' : o.by === 'symbol' ? 'symbols' : 'chunks (no parser structure)';
+            o.by === 'region'
+                ? 'structural regions'
+                : o.by === 'section'
+                  ? 'sections'
+                  : o.by === 'symbol'
+                    ? 'symbols'
+                    : 'chunks (no parser structure)';
         return (
             `${o.file} — ${o.lines} lines in ${o.total} ${what}${o.library ? '  (library code, read directly — not indexed)' : `  at=${o.at}`}\n` +
             o.symbols
@@ -827,7 +833,9 @@ function createTools({ workspace, workspaces = () => [], grepMaxChars = 12000 } 
                 )
                 .join('\n') +
             (o.truncated ? `\n  [${o.total} pieces, showing the first ${o.symbols.length}]` : '') +
-            `\n  [read any one with code_read "<file>:<from>-<to>"]`
+            (o.by === 'section'
+                ? `\n  [read any one with code_read "<file>:<from>-<to>", a heading also as "<file>#<heading>"]`
+                : `\n  [read any one with code_read "<file>:<from>-<to>"]`)
         );
     }
 

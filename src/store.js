@@ -350,7 +350,13 @@ async function openStore({ db, id, access, profiles = [], log = () => {} } = {})
 
     async function attachOnce(st) {
         const { name, parts, spec: profile } = st;
-        const { embedder } = profile;
+        // A host's own embed function is told WHICH workspace it embeds for
+        // (embed(texts, { workspace })): one profile serves every workspace,
+        // and only the host knows what each one's text may be sent to. The
+        // id rides in the embedder config — the one thing okdb hands a
+        // factory — which is not part of the vector space's fingerprint.
+        const custom = parts && parts.type === 'custom';
+        const embedder = custom ? { ...profile.embedder, workspace: id } : profile.embedder;
         const creates = createsPipelines();
         // Pending carries no pipeline: status must not report the indexer
         // stats of a pipeline nobody has created.
@@ -419,6 +425,20 @@ async function openStore({ db, id, access, profiles = [], log = () => {} } = {})
             // embeds a query locally from the persisted embedder record).
             if (creates && st.embedderName) {
                 const eng = db.engines.getEngine?.('embedder', st.embedderName);
+                // A pipeline created before the embedder config carried its
+                // workspace: patched in, then restarted so the running
+                // instance has it (patchDeclaration alone persists it for the
+                // next start). The fingerprint — type, model, dims — does not
+                // move, so nothing is re-embedded.
+                const cfg = eng?.docEntry?.value?.config;
+                if (custom && cfg && cfg.workspace !== id && typeof eng.patchDeclaration === 'function') {
+                    try {
+                        await eng.patchDeclaration({ config: { ...cfg, workspace: id } });
+                        if (typeof db.engines.restart === 'function') await db.engines.restart('embedder', st.embedderName);
+                    } catch (err) {
+                        log(`[okcode] could not name workspace ${id} on embedder ${st.embedderName}: ${err.message}`);
+                    }
+                }
                 if (eng && !eng.isRunning && typeof eng.start === 'function') await eng.start().catch(() => {});
             }
             // okdb reads a pipeline's durable doc status from its vector

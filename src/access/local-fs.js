@@ -12,6 +12,14 @@ const { DEFAULT_SKIP, sha1, pathChecker, mtimeOf, procStartTime, acquireLock, se
 
 const tmpName = () => `.okcode-tmp-${process.pid}-${crypto.randomBytes(6).toString('hex')}`;
 
+async function isDir(p) {
+    try {
+        return (await fsp.stat(p)).isDirectory();
+    } catch {
+        return false;
+    }
+}
+
 async function unlinkQuiet(p) {
     try {
         await fsp.unlink(p);
@@ -29,15 +37,60 @@ function localFs(root) {
     const checkPath = pathChecker(dialect);
     const abs = (rel) => path.join(base, ...checkPath(rel).split('/'));
 
-    async function list({ skip = DEFAULT_SKIP } = {}) {
+    // `under` lists one subtree (a directory, or a single file) instead of
+    // the whole root — the skip names and dot-directory rule then apply BELOW
+    // it, not to its own segments, which is how an explicitly named library
+    // folder (node_modules/<pkg>) is reached at all. Confined like every other
+    // path: lexically (checkPath), and by real path — a symlink on the way
+    // that resolves outside the root is refused, never followed out.
+    // `limit` stops the walk after that many files; the array then carries
+    // `truncated: true`.
+    async function list({ skip = DEFAULT_SKIP, under = null, limit = 0 } = {}) {
         const skipSet = new Set(skip);
+        const cap = Number(limit) > 0 ? Math.floor(Number(limit)) : Infinity;
         const out = [];
+        let startAbs = base;
+        let startRel = '';
+        if (under != null && under !== '') {
+            startRel = checkPath(under);
+            startAbs = abs(startRel);
+            let real;
+            let realBase;
+            try {
+                [real, realBase] = await Promise.all([fsp.realpath(startAbs), fsp.realpath(base)]);
+            } catch {
+                return out; // not there
+            }
+            if (real !== realBase && !real.startsWith(realBase.endsWith(path.sep) ? realBase : realBase + path.sep)) {
+                throw new Error(`workspace path escapes the root (symlink): ${JSON.stringify(under)}`);
+            }
+            const lst = await fsp.lstat(startAbs).catch(() => null);
+            // A symlinked directory that stays inside the root is walked (a
+            // pnpm-style node_modules is made of them); a link to a file is
+            // not listed, like every link below.
+            const dir = lst && (lst.isDirectory() || (lst.isSymbolicLink() && (await isDir(startAbs))));
+            if (!dir) {
+                // A single file: listed only if it is a regular, readable file
+                // and not itself a link (links are never listed).
+                if (lst && lst.isFile()) {
+                    try {
+                        await fsp.access(startAbs, fs.constants.R_OK);
+                        const st = await fsp.stat(startAbs, { bigint: true });
+                        out.push({ path: startRel, size: Number(st.size), mtime: mtimeOf(st) });
+                    } catch {
+                        /* unreadable: nothing */
+                    }
+                }
+                return out;
+            }
+        }
         // Same two rules as the shell dialects: dot-directories BELOW the root
         // (and skip names at any depth) are pruned by the walk itself — never
         // descended — and an entry that cannot be read costs itself alone,
         // never the listing. The root may itself be a dot directory. Symlinks
         // are not followed (no cycles, no walking out of the root).
         async function walk(dirAbs, dirRel) {
+            if (out.length > cap) return;
             let entries;
             try {
                 entries = await fsp.readdir(dirAbs, { withFileTypes: true });
@@ -66,7 +119,12 @@ function localFs(root) {
             );
             for (const [full, rel] of subdirs) await walk(full, rel);
         }
-        await walk(base, '');
+        await walk(startAbs, startRel);
+        if (out.length > cap) {
+            const kept = out.slice(0, cap);
+            kept.truncated = true;
+            return kept;
+        }
         return out;
     }
 

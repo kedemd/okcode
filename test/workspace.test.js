@@ -65,15 +65,15 @@ for (const fac of facades()) {
             assert.equal(s.files, FIXTURE_FILES.length, JSON.stringify(s.dirs));
             assert.deepEqual(s.unparsed, [], 'nothing failed to parse (incl. the .mjs)');
             assert.ok(s.symbols >= 6, `saw ${s.symbols}`);
-            for (const hidden of [
-                'session-state/key-1.json',
-                'debug.log',
-                '.cache/blob.js',
-                'node_modules/widget/package.json',
-            ]) {
+            for (const hidden of ['session-state/key-1.json', 'debug.log', '.cache/blob.js']) {
                 const r = await ws.readFile(hidden);
                 assert.equal(r.ok, false, `${hidden} must not be indexed`);
             }
+            // Library code is not indexed either; named by path it is read
+            // directly (and says so), still outside the index.
+            const lib = await ws.readFile('node_modules/widget/package.json');
+            assert.equal(lib.library, true, 'node_modules is read directly, never from the index');
+            assert.ok(!(await ws.files({})).files.some((f) => f.file.startsWith('node_modules/')));
             const st = await ws.stats();
             assert.equal(st.files, FIXTURE_FILES.length);
             assert.equal(st.failedParse, 0);

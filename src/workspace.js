@@ -32,6 +32,7 @@ const textUtil = require('./analysis/text');
 const { chunkCode } = require('./analysis/chunk');
 const { quoteLines, asQuery } = require('./store');
 const { compileMatcher, matchText, tallyText, pathMatcher } = require('./grep');
+const { DEFAULT_SKIP } = require('./access/common');
 
 const DEFAULTS = {
     // A whole-file read is capped by LINES, not bytes: a truncated read must
@@ -61,6 +62,17 @@ const DEFAULTS = {
     // Directory names the facade's list() prunes at any depth (null = the
     // facade's default).
     skip: null,
+    // LIBRARY CODE (node_modules, vendor, dist… — any skip name) is never
+    // indexed, but a path that names it explicitly is searched DIRECTLY: a
+    // fresh listing of that subtree, read, matched, forgotten. Bounded so a
+    // careless `paths: ['node_modules']` answers "narrow the path" instead of
+    // hanging: grep lists at most `libraryFiles` files per call, an outline or
+    // name lookup parses at most `libraryParseFiles`, and the parsed symbols
+    // of the last `libraryScans` subtrees are kept in memory (LRU) for this
+    // object's life — never in the store, never embedded.
+    libraryFiles: 20000,
+    libraryParseFiles: 2000,
+    libraryScans: 4,
 };
 // A leftover sliver of a carved region — the `};` between a template and a
 // style block — is not a piece anyone wants offered. An outline is a menu, not
@@ -1027,6 +1039,357 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
         return out;
     }
 
+    // ── library code: searched on demand, never indexed ─────────────────
+    // A path is LIBRARY when one of its segments is a skip name
+    // (node_modules, vendor, dist…). The walk never enters one, so nothing
+    // there is indexed, full-text indexed or embedded: it is reference
+    // material, huge, rewritten on every install, almost never asked about.
+    // But when a question IS about a library, the caller names it — and then
+    // it is read the way rg reads it: that subtree listed fresh, its files
+    // read, matched, forgotten. Nothing here touches `files`, the store or the
+    // embedders; the only thing kept is the parsed symbols of a few named
+    // subtrees (scanLibrary), in memory.
+    const skipNames = new Set((opts.skip || DEFAULT_SKIP).map(String));
+    const normPath = (p) => {
+        let s = String(p == null ? '' : p).replace(/\\/g, '/');
+        const root = typeof access.root === 'string' ? access.root.replace(/\\/g, '/').replace(/\/$/, '') : null;
+        if (root && s.toLowerCase().startsWith(`${root.toLowerCase()}/`)) s = s.slice(root.length + 1);
+        return s.replace(/^\.(\/|$)/, '').replace(/^\/+|\/+$/g, '');
+    };
+    // null = not a library path; { rel } = cleaned and addressable;
+    // { error } = a library path the facade refuses (`..`, absolute). A
+    // dot-directory is working state (.git), never a library: null.
+    function libraryPath(p) {
+        const raw = normPath(p);
+        if (!raw) return null;
+        const segs = raw.split('/');
+        if (!segs.some((x) => skipNames.has(x) && !x.startsWith('.'))) return null;
+        // A skip name is pruned as a DIRECTORY only: a project file called
+        // `build` is indexed, and stays addressed through the index.
+        if (files.has(raw)) return null;
+        if (!segs.includes('..') && segs.some((x) => x.startsWith('.') && x !== '.')) return null;
+        try {
+            return { rel: typeof access.checkPath === 'function' ? access.checkPath(raw) : raw };
+        } catch (err) {
+            return { error: String((err && err.message) || err) };
+        }
+    }
+    const badPath = (msg) => {
+        const err = new Error(msg);
+        err.code = 'OKCODE_BAD_PATH';
+        return err;
+    };
+
+    // A fresh listing of the named library subtrees: { rows: [{ rel, size,
+    // mtime }] sorted by path, truncated, roots }. Below a named subtree only
+    // a nested node_modules is pruned — another library, reached by naming
+    // it — so a package's dist/ or vendor/ (often all the code it ships) is
+    // in. Secret, opaque and oversized files are out, as everywhere; the
+    // project's .gitignore is not consulted (it ignores node_modules itself).
+    // `cap` bounds the walk across all roots. `missing`: the named roots the
+    // listing found nothing at — not installed, a typo, or empty. Said, never
+    // left to read as "no match": an absent hit is evidence only where the
+    // search actually looked.
+    async function listLibrary(roots, cap) {
+        const uniq = [...new Set(roots)];
+        const tops = uniq.filter((r) => !uniq.some((o) => o !== r && r.startsWith(`${o}/`)));
+        const seen = new Map();
+        let truncated = false;
+        let listedN = 0;
+        const missing = [];
+        for (const root of tops) {
+            const left = cap - listedN;
+            if (left <= 0) {
+                truncated = true;
+                break;
+            }
+            let listed;
+            try {
+                listed = await access.list({ under: root, skip: ['node_modules'], limit: left });
+            } catch (err) {
+                throw badPath(`${root}: ${String((err && err.message) || err)}`);
+            }
+            if (listed.truncated) truncated = true;
+            listedN += listed.length;
+            if (!listed.some((r) => r.path === root || r.path.startsWith(`${root}/`))) missing.push(root);
+            for (const r of listed) {
+                // A facade that ignores `under` hands back the whole tree:
+                // only the subtree counts, whatever arrived.
+                if (r.path !== root && !r.path.startsWith(`${root}/`)) continue;
+                if (/(^|\/)\.[^/]+\//.test(r.path) || OWN_TRANSIENT.test(r.path)) continue;
+                if (!isTextual(r.path, r.size) || isSecret(r.path)) continue;
+                seen.set(r.path, { rel: r.path, size: r.size, mtime: r.mtime });
+            }
+        }
+        const rows = [...seen.values()].sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
+        return { rows, truncated, roots: tops, missing };
+    }
+
+    // One library file named by path, read directly: { ok, rel, text, at,
+    // size } or { ok: false, reason }. Listed first (as a subtree of one), so
+    // the facade's confinement — lexical and by real path — decides whether
+    // it may be read at all; a symlink out of the root is refused there.
+    async function libraryFile(rel) {
+        let listed;
+        try {
+            listed = await access.list({ under: rel, skip: [], limit: 1 });
+        } catch (err) {
+            return { ok: false, reason: String((err && err.message) || err) };
+        }
+        const row = listed.find((r) => r.path === rel);
+        if (!row) {
+            return listed.length
+                ? {
+                      ok: false,
+                      isDir: true,
+                      reason: `${rel} is a directory — outline it for its files and symbols, or grep with paths: ["${rel}"]`,
+                  }
+                : {
+                      ok: false,
+                      reason: `there is no file "${rel}" (library code is read directly from disk — check the path)`,
+                  };
+        }
+        if (isSecret(rel)) return { ok: false, reason: `${rel} may hold credentials — never read` };
+        if (!isTextual(rel, row.size))
+            return { ok: false, reason: `${rel} is not readable as text (binary or oversized)` };
+        const buf = (await access.read([rel])).get(rel);
+        if (!buf) return { ok: false, reason: `${rel} could not be read` };
+        return { ok: true, rel, text: textUtil.decode(buf).text, at: sha1(buf), size: buf.length };
+    }
+
+    // The parsed symbols of one named library subtree (a directory or a
+    // file), kept IN MEMORY ONLY for this object's life: subtree → Map<rel,
+    // { size, mtime, lines, lang, symbols }>, least recently used first, at
+    // most opts.libraryScans subtrees. A rescan re-lists (one call) and
+    // re-parses only files whose size or mtime moved — an install rewrites
+    // them, and a stale outline would be worse than none. Never written to the
+    // store, never embedded, never full-text indexed; no text is kept.
+    const libraryScans = new Map();
+    async function scanLibrary(root) {
+        const listed = await listLibrary([root], Math.max(1, opts.libraryParseFiles));
+        const prior = libraryScans.get(root) || new Map();
+        libraryScans.delete(root);
+        const next = new Map();
+        const need = [];
+        for (const r of listed.rows) {
+            const p = prior.get(r.rel);
+            if (p && p.size === r.size && p.mtime === r.mtime) next.set(r.rel, p);
+            else need.push(r);
+        }
+        if (need.length) {
+            const sizes = new Map(need.map((r) => [r.rel, r.size]));
+            const got = await readMany(
+                need.map((r) => r.rel),
+                (rel) => sizes.get(rel),
+                { onFileError: () => {} },
+            );
+            for (const r of need) {
+                const buf = got.get(r.rel);
+                if (!buf) continue;
+                let x;
+                try {
+                    x = extract(r.rel, textUtil.decode(buf).text);
+                } catch {
+                    continue;
+                }
+                next.set(r.rel, {
+                    size: r.size,
+                    mtime: r.mtime,
+                    lines: x.lines,
+                    lang: x.lang,
+                    symbols: x.symbols || [],
+                });
+            }
+        }
+        libraryScans.set(root, next);
+        while (libraryScans.size > Math.max(1, opts.libraryScans)) {
+            libraryScans.delete(libraryScans.keys().next().value);
+        }
+        const out = [...next.entries()]
+            .map(([rel, e]) => ({ rel, ...e }))
+            .sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
+        return { root, files: out, truncated: listed.truncated, missing: listed.missing.length > 0 };
+    }
+
+    // A read of a library file named by path: the whole file (capped by
+    // lines, as readFile), a range, or `file#symbol` (that one file parsed in
+    // memory). Same result shapes as the indexed reads, plus `library: true`;
+    // nothing is recorded.
+    async function readLibrary(rel, { from = null, to = null, symbol = null, maxLines = opts.fileReadLines } = {}) {
+        const got = await libraryFile(rel);
+        if (!got.ok) return got;
+        const lines = got.text.split('\n');
+        if (symbol) {
+            let syms = [];
+            try {
+                syms = extract(rel, got.text).symbols || [];
+            } catch {
+                syms = [];
+            }
+            const byPath = syms.filter((x) => (x.path || x.name) === symbol);
+            const hits = byPath.length ? byPath : syms.filter((x) => x.name === symbol);
+            if (!hits.length) {
+                return {
+                    ok: false,
+                    reason: `${rel} has no symbol "${symbol}" — outline it for its names, or read a range "${rel}:<from>-<to>"`,
+                };
+            }
+            if (hits.length > 1) {
+                return {
+                    ok: false,
+                    ambiguous: true,
+                    reason: `"${symbol}" is defined in ${hits.length} places in ${rel} — read one by range`,
+                    candidates: hits.map((h) => `${rel}:${h.lineStart}-${h.lineEnd}`),
+                };
+            }
+            const h = hits[0];
+            return {
+                ok: true,
+                library: true,
+                name: h.name,
+                kind: h.kind,
+                file: rel,
+                path: h.path || h.name,
+                parent: h.parent || null,
+                lineStart: h.lineStart,
+                lineEnd: h.lineEnd,
+                at: got.at,
+                body: symbolText(got.text, h),
+            };
+        }
+        if (from || to) {
+            const start = Math.max(1, Number(from) || 1);
+            const end = Math.min(lines.length, Math.max(start, Number(to) || start));
+            return {
+                ok: true,
+                library: true,
+                file: rel,
+                lineStart: start,
+                lineEnd: end,
+                lines: lines.length,
+                at: got.at,
+                body: lines.slice(start - 1, end).join('\n'),
+            };
+        }
+        const shown = Math.min(lines.length, maxLines);
+        return {
+            ok: true,
+            library: true,
+            file: rel,
+            lineStart: 1,
+            lineEnd: shown,
+            lines: lines.length,
+            at: got.at,
+            body: lines.slice(0, shown).join('\n'),
+            ...(shown < lines.length
+                ? {
+                      truncated: true,
+                      more: `${rel}:${shown + 1}-${lines.length}`,
+                      note: `showing lines 1-${shown} of ${lines.length}; read "${rel}:${shown + 1}-${Math.min(lines.length, shown + maxLines)}" for the next stretch`,
+                  }
+                : {}),
+        };
+    }
+
+    // outline() of a library path. A FILE: its symbols (or, with none, its
+    // chunks), parsed in memory from one direct read. A DIRECTORY: the
+    // subtree's files with their top-level symbols, from scanLibrary — the
+    // map of a package nobody indexed, for choosing what to read.
+    async function outlineLibrary(lib, limit) {
+        if (lib.error) return { ok: false, reason: lib.error };
+        const one = await libraryFile(lib.rel);
+        if (one.ok) {
+            let syms = [];
+            try {
+                syms = extract(one.rel, one.text).symbols || [];
+            } catch {
+                syms = [];
+            }
+            const lines = one.text.split('\n');
+            const head = { ok: true, library: true, file: one.rel, lines: lines.length, at: one.at };
+            if (syms.length) {
+                return {
+                    ...head,
+                    by: 'symbol',
+                    total: syms.length,
+                    truncated: syms.length > limit,
+                    symbols: syms.slice(0, limit).map((x) => ({
+                        name: x.name,
+                        path: x.path || x.name,
+                        kind: x.kind,
+                        parent: x.parent || null,
+                        lineStart: x.lineStart,
+                        lineEnd: x.lineEnd,
+                        span: x.lineEnd - x.lineStart + 1,
+                        signature: x.signature || null,
+                        doc: x.doc ? String(x.doc).slice(0, 200) : null,
+                    })),
+                };
+            }
+            const before = (n) => one.text.slice(0, n).split('\n').length;
+            const cut = [];
+            for (const c of chunkCode(one.text, one.rel)) {
+                const a = before(c.start);
+                const b = Math.max(a, before(c.end) - (String(one.text[c.end - 1] || '') === '\n' ? 1 : 0));
+                for (const [x, y] of splitPiece(a, b, String(c.text || ''), opts.outlineMaxLines)) {
+                    cut.push({ name: 'chunk', kind: 'chunk', lineStart: x, lineEnd: y, doc: null });
+                }
+            }
+            const pieces = labelPieces(cut, lines);
+            return {
+                ...head,
+                by: 'chunk',
+                total: pieces.length,
+                truncated: pieces.length > limit,
+                symbols: pieces.slice(0, limit).map((p) => ({
+                    name: p.name,
+                    path: `${one.rel}:${p.lineStart}-${p.lineEnd}`,
+                    kind: 'chunk',
+                    parent: null,
+                    lineStart: p.lineStart,
+                    lineEnd: p.lineEnd,
+                    span: Math.max(1, p.lineEnd - p.lineStart + 1),
+                    signature: null,
+                    doc: p.doc,
+                })),
+            };
+        }
+        if (!one.isDir) return one;
+        let scan;
+        try {
+            scan = await scanLibrary(lib.rel);
+        } catch (err) {
+            return { ok: false, reason: String((err && err.message) || err) };
+        }
+        return {
+            ok: true,
+            library: true,
+            by: 'files',
+            dir: lib.rel,
+            total: scan.files.length,
+            lines: scan.files.reduce((n, f) => n + (f.lines || 0), 0),
+            symbolCount: scan.files.reduce((n, f) => n + f.symbols.length, 0),
+            // The parse cap (opts.libraryParseFiles) stopped the listing.
+            capped: scan.truncated,
+            cap: opts.libraryParseFiles,
+            truncated: scan.files.length > limit,
+            entries: scan.files.slice(0, limit).map((f) => ({
+                file: f.rel,
+                lines: f.lines,
+                lang: f.lang,
+                symbols: f.symbols
+                    .filter((x) => !x.parent)
+                    .map((x) => ({
+                        name: x.name,
+                        kind: x.kind,
+                        lineStart: x.lineStart,
+                        lineEnd: x.lineEnd,
+                        exported: !!x.exported,
+                    })),
+            })),
+        };
+    }
+
     async function grepAll(pattern, o = {}) {
         const t0 = Date.now();
         const int = (v, dflt, lo, hi) => {
@@ -1044,15 +1407,56 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
         const maxFiles = int(o.maxFiles, Infinity, 1, Infinity);
         const offset = int(o.offset, 0, 0, Number.MAX_SAFE_INTEGER);
         const page = int(o.page, 1, 1, Number.MAX_SAFE_INTEGER);
-        const inPath = pathMatcher({ glob: o.glob, paths: o.paths });
-
         const ready = indexReady();
-        const universe = (await grepUniverse(ready)).filter((r) => !inPath || inPath(r.rel));
-        const { rels, via } = await narrow(
-            universe.map((r) => r.rel),
-            matcher,
-            ready,
-        );
+        // A `paths` entry inside a skipped directory (node_modules/<pkg>…)
+        // brings that subtree in for THIS call only, searched directly (see
+        // listLibrary). Without one, nothing below differs from a plain grep:
+        // library code never floods a normal search. Globs never reach into
+        // a skipped directory — only a path names one.
+        const named = [].concat(o.paths == null ? [] : o.paths).map((p) => [p, libraryPath(p)]);
+        const libRoots = named.filter(([, l]) => l);
+        let universe;
+        let rels;
+        let via;
+        let libSet = null;
+        let libList = null;
+        let libFiles = 0;
+        if (!libRoots.length) {
+            const inPath = pathMatcher({ glob: o.glob, paths: o.paths });
+            universe = (await grepUniverse(ready)).filter((r) => !inPath || inPath(r.rel));
+            ({ rels, via } = await narrow(
+                universe.map((r) => r.rel),
+                matcher,
+                ready,
+            ));
+        } else {
+            const refused = libRoots.find(([, l]) => l.error);
+            if (refused) throw badPath(`${refused[0]}: ${refused[1].error}`);
+            const own = named.filter(([, l]) => !l).map(([p]) => p);
+            const inPath = own.length ? pathMatcher({ glob: o.glob, paths: own }) : null;
+            universe = own.length ? (await grepUniverse(ready)).filter((r) => !inPath || inPath(r.rel)) : [];
+            ({ rels, via } = await narrow(
+                universe.map((r) => r.rel),
+                matcher,
+                ready,
+            ));
+            libList = await listLibrary(
+                libRoots.map(([, l]) => l.rel),
+                Math.max(1, opts.libraryFiles),
+            );
+            const inGlob = pathMatcher({ glob: o.glob });
+            const libUniverse = libList.rows.filter((r) => !inGlob || inGlob(r.rel));
+            libFiles = libUniverse.length;
+            const lib = await narrow(
+                libUniverse.map((r) => r.rel),
+                matcher,
+                false,
+            );
+            libSet = new Set(lib.rels);
+            rels = [...rels, ...lib.rels].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+            if (!own.length) via = lib.via;
+            universe = [...universe, ...libUniverse];
+        }
 
         // Every candidate is read to the end: the counts are exact whatever
         // is shown. Only the lines of the requested page are materialized.
@@ -1079,7 +1483,21 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
         const B = Math.max(1, opts.readBatchFiles);
         for (let i = 0; i < rels.length; i += B) {
             const chunk = rels.slice(i, i + B);
-            const texts = await grepTexts(chunk, ready);
+            let texts;
+            if (!libSet) texts = await grepTexts(chunk, ready);
+            else {
+                // Library files are always read directly: never verified
+                // into the working set, never recorded.
+                texts = await grepTexts(
+                    chunk.filter((r) => !libSet.has(r)),
+                    ready,
+                );
+                for (const [rel, t] of await grepTexts(
+                    chunk.filter((r) => libSet.has(r)),
+                    false,
+                ))
+                    texts.set(rel, t);
+            }
             for (const rel of chunk) {
                 const got = texts.get(rel);
                 if (!got) continue;
@@ -1156,6 +1574,20 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
             // false: answered before the index was ready (straight from the
             // facade's listing and reads).
             indexed: ready,
+            // Library subtrees named in `paths`, searched directly: which,
+            // how many searchable files, and whether the listing cap
+            // (opts.libraryFiles) cut the walk short.
+            ...(libList
+                ? {
+                      library: {
+                          paths: libList.roots,
+                          files: libFiles,
+                          truncated: libList.truncated,
+                          cap: opts.libraryFiles,
+                          ...(libList.missing.length ? { missing: libList.missing } : {}),
+                      },
+                  }
+                : {}),
             elapsedMs: Date.now() - t0,
         };
         if (output === 'files') {
@@ -1731,7 +2163,7 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
         // which in a well-commented codebase answers "where is X handled"
         // better than a name search does; then file content, attributed to
         // the symbol containing each matched line.
-        async find(query, { kind = null, limit = 20 } = {}, _retried = false) {
+        async find(query, { kind = null, limit = 20, path = null } = {}, _retried = false) {
             const q = String(query).toLowerCase();
             // ONE scoring rule for every hit, whatever index produced it. An
             // exact name match is an exact name match whether full-text
@@ -1748,6 +2180,48 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
                 }
                 return best;
             };
+            // Scoped to a PATH. A library path is looked up BY NAME (and doc
+            // prose) in that subtree's in-memory scan (scanLibrary) — never
+            // by meaning, never through the store, which holds none of it.
+            // A project path filters the ordinary answer.
+            if (path != null && path !== '') {
+                const lib = libraryPath(path);
+                if (lib) {
+                    if (lib.error) throw badPath(`${path}: ${lib.error}`);
+                    const scan = await scanLibrary(lib.rel);
+                    const hits = [];
+                    for (const f of scan.files) {
+                        for (const s of f.symbols) {
+                            if (kind && s.kind !== kind) continue;
+                            const score =
+                                nameScore(s.name, s.path) || ((s.doc || '').toLowerCase().includes(q) ? 25 : 0);
+                            if (!score) continue;
+                            hits.push({
+                                name: s.name,
+                                kind: s.kind,
+                                file: f.rel,
+                                path: s.path || s.name,
+                                parent: s.parent || null,
+                                lines: `${s.lineStart}-${s.lineEnd}`,
+                                span: s.lineEnd - s.lineStart + 1,
+                                signature: s.signature || null,
+                                doc: (s.doc || '').slice(0, 160) || null,
+                                exported: !!s.exported,
+                                score,
+                                via: 'library',
+                            });
+                        }
+                    }
+                    const res = hits.sort((a, b) => b.score - a.score || a.span - b.span).slice(0, limit);
+                    res.library = { path: lib.rel, files: scan.files.length, truncated: scan.truncated, ...(scan.missing ? { missing: true } : {}) };
+                    return res;
+                }
+                const inPath = pathMatcher({ paths: [path] });
+                if (inPath) {
+                    const all = await api.find(query, { kind, limit: Math.max(limit * 5, 100) }, _retried);
+                    return all.filter((h) => inPath(h.file)).slice(0, limit);
+                }
+            }
             // A symbol found by both indexes is ONE hit: the better score
             // wins, and `alsoVia` records the other eyes. A later, weaker
             // channel must not overwrite `via` — the label is how a caller
@@ -1921,7 +2395,16 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
         // given, its identity (OKCODE_IDENTITY_MISMATCH). The lexical eyes
         // need words: with a vector and no text the answer is semantic only;
         // with both, the three eyes fuse exactly as for a string.
-        async ask(query, { limit = 12, profile = null } = {}) {
+        async ask(query, { limit = 12, profile = null, path = null } = {}) {
+            // Library code has no vectors by design (never embedded): say so
+            // rather than answer from the project as if the scope held.
+            if (path != null && path !== '' && libraryPath(path)) {
+                const err = new Error(
+                    `${normPath(path)} is library code, which is never embedded — searching it by meaning is not supported; grep it (paths: ["${normPath(path)}"]) or look a name up in it (find with path)`,
+                );
+                err.code = 'OKCODE_LIBRARY_NOT_INDEXED';
+                throw err;
+            }
             if (!store || !store.hasProfiles()) {
                 const err = new Error(`workspace "${id}" has no embedding profile — ask() is unavailable`);
                 err.code = 'OKCODE_NO_EMBEDDINGS';
@@ -2100,6 +2583,8 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
         // and only the survivors cost a body read. Verified first, and the
         // `at` comes back with it.
         async outline(filePath, { limit = 80 } = {}) {
+            const lib = libraryPath(filePath);
+            if (lib) return outlineLibrary(lib, limit);
             await ensureOpen();
             const f = fileOf(filePath);
             if (!f) return { ok: false, reason: await explainTarget(filePath) };
@@ -2243,7 +2728,9 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
         //       regex = false,          // JS RegExp syntax when true
         //       caseSensitive = false,  // true | false | 'smart'
         //       glob,                   // '*.js' | ['src/**', '!*.test.js']
-        //       paths,                  // ['src', 'lib/x.js'] — dirs or files
+        //       paths,                  // ['src', 'lib/x.js'] — dirs or files; one
+        //                               // inside node_modules/vendor/dist… is
+        //                               // searched directly (library code)
         //       context = 0, before, after,   // lines around each match
         //       maxMatches = 200, maxPerFile = 50, maxFiles = ∞,
         //       output = 'lines',       // | 'files' (rg -c) | 'matches' (rg -o | uniq -c)
@@ -2254,7 +2741,7 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
         //          total: { lines, files, distinct?, occurrences? },
         //          counts: [{ file, count, start, at }], page, pages, offset,
         //          next: { page, offset } | null, searched, candidates,
-        //          via, indexed, truncated, elapsedMs }
+        //          via, indexed, truncated, elapsedMs, library? }
         //
         // Files in path order; counts are exact whatever the caps (every
         // candidate is read), and `truncated` says something was not shown. `via` names
@@ -2267,6 +2754,13 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
         // are never searched. A bad pattern throws (code GREP_BAD_PATTERN).
         async grep(pattern, options = {}) {
             return grepAll(pattern, options || {});
+        },
+
+        // Whether a path names library code (inside a skip-named directory:
+        // node_modules, vendor, dist…) — searched directly when named, never
+        // indexed.
+        isLibraryPath(p) {
+            return !!libraryPath(p);
         },
 
         // ── glob ────────────────────────────────────────────────────────
@@ -2364,7 +2858,6 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
         //   read('public/dashboard.html')           a whole file
         //   read('public/dashboard.html:269-339')   a range
         async read(query, { from = null, to = null } = {}) {
-            await ensureOpen();
             // A trailing :N-M (or #N-M) is a range, but a bare `store.js#name`
             // is not, and neither is a Windows drive letter.
             const range = parseRange(query);
@@ -2373,6 +2866,18 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
                 to = to || range.to;
                 query = range.file;
             }
+            // A library file named by path is read straight from disk
+            // (readLibrary); `file#name` parses that one file in memory.
+            // Only a PATH (with a `/`): a bare `build` or `dist` is far more
+            // likely a symbol's name than a whole library folder.
+            const cut = String(query).indexOf('#');
+            const head = cut > 0 ? String(query).slice(0, cut) : String(query);
+            const lib = /[\\/]/.test(head) ? libraryPath(head) : null;
+            if (lib) {
+                if (lib.error) return { ok: false, reason: lib.error };
+                return readLibrary(lib.rel, { from, to, symbol: cut > 0 ? String(query).slice(cut + 1) : null });
+            }
+            await ensureOpen();
             const r = await resolve(query);
             // Not a symbol, but a file the index knows — serve it rather than
             // sending the caller to the shell for bytes we can reach.
@@ -2406,6 +2911,8 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
         // a token is the shape of truncation that makes a caller edit against
         // half a statement.
         async readFile(filePath, { maxLines = opts.fileReadLines } = {}) {
+            const lib = libraryPath(filePath);
+            if (lib) return lib.error ? { ok: false, reason: lib.error } : readLibrary(lib.rel, { maxLines });
             await ensureOpen();
             const f = fileOf(filePath);
             if (!f) return { ok: false, reason: await explainTarget(filePath) };
@@ -2438,6 +2945,20 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
         },
 
         async readAt(filePath, lineStart, lineEnd, at = null) {
+            const lib = libraryPath(filePath);
+            if (lib) {
+                if (lib.error) return { ok: false, reason: lib.error };
+                const got = await readLibrary(lib.rel, { from: lineStart || 1, to: lineEnd || lineStart || 1 });
+                if (got.ok && at && at !== got.at) {
+                    return {
+                        ok: false,
+                        stale: true,
+                        reason: 'the file changed since that range was resolved',
+                        at: got.at,
+                    };
+                }
+                return got;
+            }
             await ensureOpen();
             const f = fileOf(filePath);
             if (!f) return { ok: false, reason: await explainTarget(filePath) };

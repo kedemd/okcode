@@ -237,13 +237,22 @@ function shell({ root, run, dialect = 'bash' } = {}) {
     const checkPath = pathChecker(d.pathDialect);
     const call = (method, fields, tail) => run(d.scripts[method], d.frame([root, ...fields], tail));
 
-    async function list({ skip = DEFAULT_SKIP } = {}) {
-        const raw = await call('list', skip.map(String));
+    // `under` (one subtree, confined by real path on the target) and `limit`
+    // (stop the walk) as in docs/ACCESS.md; the scripts say how.
+    async function list({ skip = DEFAULT_SKIP, under = null, limit = 0 } = {}) {
+        const sub = under != null && under !== '' ? checkPath(under) : '';
+        const cap = Number(limit) > 0 ? Math.floor(Number(limit)) : 0;
+        const raw = await call('list', [sub, String(cap), ...skip.map(String)]);
         const buf = Buffer.from(String(raw).replace(/\s+/g, ''), 'base64');
         const parts = buf.toString('utf8').split('\0');
         const out = [];
         for (let i = 0; i + 2 < parts.length; i += 3) {
             out.push({ path: parts[i], size: Number(parts[i + 1]), mtime: Number(parts[i + 2]) });
+        }
+        if (cap && out.length > cap) {
+            const kept = out.slice(0, cap);
+            kept.truncated = true;
+            return kept;
         }
         return out;
     }

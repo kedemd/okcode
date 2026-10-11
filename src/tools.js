@@ -360,10 +360,22 @@ function createTools({ workspace, workspaces = () => [], grepMaxChars = 12000 } 
             return '(code_ask) — needs `question`: what the code you are looking for DOES, in your own words.';
         const profile = a.embedder || a.profile || null;
         const query = vector ? { text: q || undefined, vector, identity: a.identity || undefined } : q;
+        // Not in the schema, but a model asking about a library may pass a
+        // path anyway: a library one gets a plain "not supported".
+        const asked = (listArg(a.paths ?? a.path) || []).map((p) => relOf(ws, p));
+        const libPath = (typeof ws.isLibraryPath === 'function' && asked.find((p) => ws.isLibraryPath(p))) || null;
         let hits;
         try {
-            hits = await ws.ask(query, { limit: Number(a.limit) || 10, profile, embedder: profile });
+            hits = await ws.ask(query, {
+                limit: Number(a.limit) || 10,
+                profile,
+                embedder: profile,
+                path: libPath,
+            });
         } catch (err) {
+            if (err && err.code === 'OKCODE_LIBRARY_NOT_INDEXED') {
+                return `(code_ask "${q}") — ${libPath} is library code, which is never embedded: searching it by meaning is not supported. Use code_grep with paths: ["${libPath}"] for its text, or code_find {query, path: "${libPath}"} for a name.`;
+            }
             if (err && err.code === 'OKCODE_NO_EMBEDDINGS') {
                 return `(code_ask "${q}") — ${ws.id} has no semantic index (no embedder configured). Use code_find for names and doc prose, or code_grep for exact text.`;
             }
@@ -548,14 +560,30 @@ function createTools({ workspace, workspaces = () => [], grepMaxChars = 12000 } 
                 maxFiles: num(a.max_files ?? a.maxFiles ?? a.limit) ?? (output === 'files' ? 500 : undefined),
             });
         } catch (err) {
-            if (err && err.code === 'GREP_BAD_PATTERN') return `(code_grep "${q}") — ${err.message}`;
+            if (err && (err.code === 'GREP_BAD_PATTERN' || err.code === 'OKCODE_BAD_PATH'))
+                return `(code_grep "${q}") — ${err.message}`;
             throw err;
         }
+        // A library path (node_modules/<pkg>…) was searched directly. A walk
+        // the cap cut short makes every count below partial: that goes right
+        // under the heading, where a host that clips the end cannot drop it.
+        // A named library path with nothing there (not installed, a typo) is
+        // said as loudly: zero hits there is no evidence of absence.
+        const capNote = [
+            r.library && r.library.missing
+                ? `  [NOT FOUND: nothing at ${r.library.missing.join(', ')} — not installed, or a wrong path; no match there means nothing. Check the package name (code_files or a listing of node_modules)]`
+                : '',
+            r.library && r.library.truncated
+                ? `  [PARTIAL: listing ${r.library.paths.join(', ')} stopped at ${r.library.cap} files — narrow the path (one package, or its src/) for a complete answer]`
+                : '',
+        ].filter(Boolean).join('\n');
+        const withCap = (text) => (capNote ? text.replace(/^[^\n]*/, (h) => `${h}\n${capNote}`) : text);
         const scope = [
             glob ? `glob ${glob.join(' ')}` : '',
             paths ? `under ${paths.join(', ')}` : '',
             r.regex ? 'regex' : '',
             r.ignoreCase ? 'ignoring case' : 'case-sensitive',
+            r.library ? 'library code read directly, not indexed' : '',
         ]
             .filter(Boolean)
             .join(', ');
@@ -563,11 +591,11 @@ function createTools({ workspace, workspaces = () => [], grepMaxChars = 12000 } 
         const counts = r.counts || r.files;
         const total = r.total || { lines: r.files.reduce((n, f) => n + f.count, 0), files: r.files.length };
         if (!total.lines) {
-            return (
+            return withCap(
                 `(code_grep "${q}") — ${r.regex ? 'no line matches that expression' : 'that text appears nowhere'} in ${ws.id} (${r.searched} files searched; ${scope}).` +
-                (glob || paths ? ' Check the glob/paths filter, or drop it.' : '') +
-                ' If you expected it to exist, it does not as written: try a shorter distinctive fragment,' +
-                ' the other case, or code_ask to search by meaning.'
+                    (glob || paths ? ' Check the glob/paths filter, or drop it.' : '') +
+                    ' If you expected it to exist, it does not as written: try a shorter distinctive fragment,' +
+                    ' the other case, or code_ask to search by meaning.',
             );
         }
         const nLines = `${total.lines} matching line${total.lines === 1 ? '' : 's'}`;
@@ -607,7 +635,7 @@ function createTools({ workspace, workspaces = () => [], grepMaxChars = 12000 } 
                 );
             }
             tail.push('  [output:\'lines\' shows the lines themselves; paths:["<file>"] for one file]');
-            return [head, ...rows.slice(0, cut), ...tail].join('\n');
+            return withCap([head, ...rows.slice(0, cut), ...tail].join('\n'));
         }
 
         if (output === 'matches') {
@@ -628,7 +656,7 @@ function createTools({ workspace, workspaces = () => [], grepMaxChars = 12000 } 
             tail.push(
                 `  [output:'lines' (with paths/glob) shows where a match is; ${"output:'files'"} counts per file]`,
             );
-            return [head, ...rows.slice(0, cut), ...tail].join('\n');
+            return withCap([head, ...rows.slice(0, cut), ...tail].join('\n'));
         }
 
         const head = `code_grep "${q}" in ${ws.id} — ${nLines} in ${nFiles} (${r.searched} searched; ${scope})${pageNote}:`;
@@ -705,7 +733,7 @@ function createTools({ workspace, workspaces = () => [], grepMaxChars = 12000 } 
             );
         }
         tail.push(readHint);
-        return `${head}\n${body}${body ? '\n' : ''}${tail.join('\n')}`;
+        return withCap(`${head}\n${body}${body ? '\n' : ''}${tail.join('\n')}`);
     }
 
     // A host whose workspace object predates grep() (only mentions()).
@@ -766,10 +794,32 @@ function createTools({ workspace, workspaces = () => [], grepMaxChars = 12000 } 
         if (!f) return '(code_outline) — needs `file`: the path to break into pieces.';
         const o = await ws.outline(f, { limit: Number(a.limit) || 60 });
         if (!o.ok) return `(code_outline "${f}") — ${toToolWords(o.reason)}`;
+        // A library FOLDER: its files and their top-level names, parsed for
+        // this answer (kept in memory, never indexed).
+        if (o.by === 'files') {
+            return (
+                `${o.dir} — library code, parsed directly (not indexed): ${o.total} file${o.total === 1 ? '' : 's'}, ${o.lines} lines, ${o.symbolCount} symbols\n` +
+                (o.capped
+                    ? `  [PARTIAL: stopped at ${o.cap} files — outline a narrower path (one package, or its src/)]\n`
+                    : '') +
+                o.entries
+                    .map((e) => {
+                        const names = e.symbols.map((x) => `${x.name}${x.exported ? '*' : ''}`);
+                        const shown =
+                            names.slice(0, 12).join(', ') + (names.length > 12 ? `, … ${names.length - 12} more` : '');
+                        return `  ${e.file}  (${e.lines} lines)${names.length ? `  ${shown}` : ''}`;
+                    })
+                    .join('\n') +
+                (o.truncated
+                    ? `\n  [${o.total} files, showing the first ${o.entries.length} — raise limit or outline a subfolder]`
+                    : '') +
+                `\n  [* = exported. code_outline one file for line ranges; code_find {query, path: "${o.dir}"} looks a name up here; code_grep with paths: ["${o.dir}"] searches its text]`
+            );
+        }
         const what =
             o.by === 'region' ? 'structural regions' : o.by === 'symbol' ? 'symbols' : 'chunks (no parser structure)';
         return (
-            `${o.file} — ${o.lines} lines in ${o.total} ${what}  at=${o.at}\n` +
+            `${o.file} — ${o.lines} lines in ${o.total} ${what}${o.library ? '  (library code, read directly — not indexed)' : `  at=${o.at}`}\n` +
             o.symbols
                 .map(
                     (s) =>
@@ -785,12 +835,31 @@ function createTools({ workspace, workspaces = () => [], grepMaxChars = 12000 } 
         const q = String(a.query || a.symbol || a.name || '');
         if (!q) return '(code_find) — needs `query`: a symbol name or a descriptive phrase.';
         const uses = !!a.uses;
-        const hits = uses
-            ? await ws.refs(q, { limit: Number(a.limit) || 30 })
-            : await ws.find(q, { limit: Number(a.limit) || 15, kind: a.kind || null });
-        if (!hits.length) return `(code_find "${q}") — no ${uses ? 'uses' : 'definitions'} found in ${ws.id}.`;
+        const scope = a.path ? relOf(ws, a.path) : null;
+        if (uses && scope && typeof ws.isLibraryPath === 'function' && ws.isLibraryPath(scope)) {
+            return `(code_find "${q}") — uses are not tracked in library code (${scope} is never indexed). Use code_grep with paths: ["${scope}"] to find where it appears.`;
+        }
+        let hits;
+        try {
+            hits = uses
+                ? await ws.refs(q, { limit: Number(a.limit) || 30 })
+                : await ws.find(q, { limit: Number(a.limit) || 15, kind: a.kind || null, path: scope });
+        } catch (err) {
+            if (err && err.code === 'OKCODE_BAD_PATH') return `(code_find "${q}") — ${err.message}`;
+            throw err;
+        }
+        const where = scope ? `${scope} in ${ws.id}` : ws.id;
+        if (!hits.length && hits.library && hits.library.missing)
+            return `(code_find "${q}") — NOT FOUND: nothing at ${hits.library.path} — not installed, or a wrong path; no hit there means nothing.`;
+        if (!hits.length) return `(code_find "${q}") — no ${uses ? 'uses' : 'definitions'} found in ${where}.`;
+        const lib = hits.library && hits.library.missing
+            ? `  [NOT FOUND: nothing at ${hits.library.path} — not installed, or a wrong path; no hit there means nothing]\n`
+            : hits.library
+            ? `  [library code, looked up by name in a direct parse of ${hits.library.files} file(s) — not indexed${hits.library.truncated ? '; PARTIAL: the parse cap stopped the listing, narrow the path' : ''}]\n`
+            : '';
         return (
-            `${uses ? 'Uses' : 'Definitions'} of "${q}" in ${ws.id}:\n` +
+            `${uses ? 'Uses' : 'Definitions'} of "${q}" in ${where}:\n` +
+            lib +
             hits
                 .map((h) =>
                     uses
@@ -810,11 +879,13 @@ function createTools({ workspace, workspaces = () => [], grepMaxChars = 12000 } 
             from: a.from ? Number(a.from) : null,
             to: a.to ? Number(a.to) : null,
         });
+        // Library code is read straight from disk and cannot be edited
+        // here, so it carries no `at` for code_edit to ask for.
         return !got.ok
             ? `(code_read ${target}) — ${toToolWords(got.reason)}${got.candidates && got.candidates.length ? `\n  candidates: ${got.candidates.join(', ')}` : ''}`
             : `${got.file}:${got.lineStart}-${got.lineEnd}` +
                   `${got.kind ? ` (${got.kind} ${got.path || got.name})` : `${got.lines ? ` of ${got.lines} lines` : ''}`}` +
-                  `  at=${got.at}\n${got.body}` +
+                  `${got.library ? '  (library code, read directly — not indexed)' : `  at=${got.at}`}\n${got.body}` +
                   (got.note ? `\n\n  [${got.note}]` : '');
     }
 
@@ -1010,13 +1081,18 @@ function createTools({ workspace, workspaces = () => [], grepMaxChars = 12000 } 
                         description: 'true = every use, by enclosing symbol; default = the definition',
                     },
                     kind: { type: 'string', description: 'Only this symbol kind (function, class, method, const, …)' },
+                    path: {
+                        type: 'string',
+                        description:
+                            'Only under this directory or file. A library path ("node_modules/<pkg>") looks names up in that package, parsed directly (by name, not by meaning)',
+                    },
                     limit: { type: 'number', description: 'Max hits (default 15; 30 for uses)' },
                 },
                 req('query'),
             ),
             def(
                 'code_grep',
-                'Search file CONTENTS like ripgrep: every matching line as `line: text`, grouped by file, with optional context lines. Literal text by default (case-insensitive); regex: true for a JavaScript regular expression; glob/paths to restrict which files. Use this INSTEAD of shelling out to grep/rg/sed: it is faster (index-accelerated, and on a remote workspace it searches where the files live), covers exactly the project (no node_modules, .gitignored or secret files), and every hit is a file:line code_read and code_edit accept. code_find/code_ask match by meaning. ' +
+                'Search file CONTENTS like ripgrep: every matching line as `line: text`, grouped by file, with optional context lines. Literal text by default (case-insensitive); regex: true for a JavaScript regular expression; glob/paths to restrict which files. Use this INSTEAD of shelling out to grep/rg/sed: it is faster (index-accelerated, and on a remote workspace it searches where the files live), covers exactly the project (no node_modules, .gitignored or secret files), and every hit is a file:line code_read and code_edit accept. code_find/code_ask match by meaning. To search an INSTALLED LIBRARY, pass its path (paths: [\"node_modules/<pkg>\"], or any folder/file inside node_modules, vendor, dist…): searched directly as it is on disk now, not indexed — never fetch library source from elsewhere. ' +
                     "Pick the output for the question: 'lines' (default) = WHERE, the lines themselves; 'files' = which files and how many matching lines each (rg -c); 'matches' = the DISTINCT matched strings with counts (rg -o | sort | uniq -c) — use it to ENUMERATE (\"every OKDB_[A-Z_]+ env var\", \"all event names\"): one call, the complete list. Counts in the heading are always exact; a capped answer ends with a line saying what was not shown and the page/offset that continues it — never report a partial list as complete.",
                 {
                     pattern: {
@@ -1037,7 +1113,8 @@ function createTools({ workspace, workspaces = () => [], grepMaxChars = 12000 } 
                     paths: {
                         type: 'array',
                         items: { type: 'string' },
-                        description: 'Only under these workspace-relative directories or files ("src", "lib/util.js")',
+                        description:
+                            'Only under these workspace-relative directories or files ("src", "lib/util.js"). A path inside node_modules/vendor/dist ("node_modules/@scope/pkg") searches that library directly — the only way to reach it',
                     },
                     context: { type: 'number', description: 'Lines of context before and after each match (default 0)' },
                     output: {
@@ -1088,16 +1165,20 @@ function createTools({ workspace, workspaces = () => [], grepMaxChars = 12000 } 
             ),
             def(
                 'code_outline',
-                'Split ONE file into named pieces (symbols, structural regions, or chunks) with line ranges and the file\'s "at". Ask before code_read when you do not yet know which part of a file you want.',
+                'Split ONE file into named pieces (symbols, structural regions, or chunks) with line ranges and the file\'s "at". Ask before code_read when you do not yet know which part of a file you want. An installed library\'s folder or file ("node_modules/<pkg>", "node_modules/<pkg>/src/x.js") is parsed directly, not indexed: a folder lists its files with their top-level names.',
                 {
-                    file: { type: 'string', description: 'Workspace-relative path (as the other tools report it)' },
+                    file: {
+                        type: 'string',
+                        description:
+                            'Workspace-relative path (as the other tools report it); a library folder such as "node_modules/<pkg>" too',
+                    },
                     limit: { type: 'number', description: 'Max pieces (default 60)' },
                 },
                 req('file'),
             ),
             def(
                 'code_read',
-                'Read source, verified against the file as it is now: a symbol ("store.js#openStore.saveFiles", or a bare name), a whole file, or a range ("public/dashboard.html:269-339"). Every read returns at=<token>: the file\'s version, which code_edit and code_write require.',
+                'Read source, verified against the file as it is now: a symbol ("store.js#openStore.saveFiles", or a bare name), a whole file, or a range ("public/dashboard.html:269-339"). Every read returns at=<token>: the file\'s version, which code_edit and code_write require. An installed library file is read by its path ("node_modules/<pkg>/src/x.js", a range, or "<file>#name") — directly from disk, not indexed, read-only.',
                 {
                     symbol: { type: 'string', description: 'A symbol, a file path, or file:from-to' },
                     from: { type: 'number', description: 'First line of a range' },

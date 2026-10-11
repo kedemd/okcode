@@ -15,9 +15,12 @@ okcode ships two implementations (`okcode.access.localFs`, `okcode.access.shell`
 
 ## Required methods
 
-### `list({ skip }) → [{ path, size, mtime }]`
+### `list({ skip, under, limit }) → [{ path, size, mtime }]`
 
 Every regular file under the root. `skip` is a list of directory names to prune at any depth (default: `node_modules .git .idea dist build coverage .next vendor`); it matches directories only (a _file_ named `dist` is listed). Dot-directories below the root are pruned. Symlinks are neither followed nor listed. Unreadable entries are skipped, never fatal — one locked file must cost that file, not the listing. No hashing.
+
+- `under` (a workspace-relative directory or file) lists only that subtree, paths still relative to the root. `skip` and the dot-directory rule apply **below** it, never to its own segments — that is how an explicitly named `node_modules/<pkg>` is reached at all. A file `under` lists that one file (if regular, readable and not a link); a missing one lists nothing. It is confined like every path: `checkPath` lexically, and by **real path** — a symlink on the way that resolves outside the root makes the call reject (`escapes the root`), never followed out. localFs and bash compare real paths (a symlinked directory that stays inside the root, as in a pnpm `node_modules`, is walked); PowerShell refuses any reparse point on the way.
+- `limit` stops the walk after that many files; the returned array then carries `truncated: true`. A facade may stop early on the target (bash: `head -z`) or cap after the transfer — either way at most `limit` rows come back.
 
 ### `stat(paths, { hash = false }) → Map<path, { size, mtime, hash? } | { missing: true }>`
 

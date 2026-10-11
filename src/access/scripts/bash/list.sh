@@ -1,4 +1,5 @@
-# stdin: root, then one skip-directory name per field.
+# stdin: root, the subtree to list ("" = the whole root), the file limit ("0" =
+# none), then one skip-directory name per field.
 # stdout: base64 of NUL-separated (relpath, size, mtime) triples. Encoding the
 # whole listing once (one fork) keeps any filename byte — spaces, newlines,
 # non-ASCII — intact without a per-file base64 fork.
@@ -14,15 +15,60 @@
 # AN UNREADABLE FILE IS SKIPPED, NOT FATAL. A workspace containing a running
 # database, or any file another process holds locked, must cost that file and
 # nothing more — never the whole listing.
+#
+# A SUBTREE (`under`, a directory or one file) is listed from inside it, so the
+# skip names and the dot-directory prune apply BELOW it and never to its own
+# segments — that is how an explicitly named node_modules/<pkg> is reached. It
+# must stay inside the root by REAL path (`pwd -P`): a symlink on the way that
+# resolves elsewhere is refused (exit 4), never followed out. Paths are still
+# printed relative to the root: the subtree's own path is the printf prefix,
+# escaped for printf.
+#
+# THE LIMIT stops the walk (head closes the pipe, find dies of SIGPIPE): at
+# most limit+1 records come back, and the caller reads the extra one as
+# "there was more". A head without -z just means no early stop; the caller
+# still caps.
+IFS= read -r -d '' under || exit 3
+IFS= read -r -d '' limit || exit 3
 args=()
 while IFS= read -r -d '' s; do args+=(-name "$s" -o); done
+cap=(cat)
+if [ "${limit:-0}" -gt 0 ] 2>/dev/null && printf 'a\0' | head -z -n 1 >/dev/null 2>&1; then
+    cap=(head -z -n $((3 * (limit + 1))))
+fi
+pfx=
+if [ -n "$under" ]; then
+    rootp=$(pwd -P)
+    if [ -d "$under" ]; then d=$under; else d=$(dirname -- "$under"); fi
+    [ -e "./$under" ] && real=$(cd -- "./$d" 2>/dev/null && pwd -P) || { printf '' | base64; exit 0; }
+    case "$real/" in
+        "$rootp"/*) ;;
+        *) echo "okcode: workspace path escapes the root (symlink): $under" >&2; exit 4 ;;
+    esac
+    if [ ! -d "$under" ]; then
+        # One file: listed only if regular, readable and not itself a link.
+        if [ -f "$under" ] && [ ! -L "$under" ] && [ -r "$under" ]; then
+            s=$(statf "./$under") && printf '%s\0%s\0%s\0' "$under" "${s% *}" "${s#* }" | base64
+        else
+            printf '' | base64
+        fi
+        exit 0
+    fi
+    cd -- "./$under" || exit 3
+    pfx="$under/"
+fi
 if [ -n "$gnufind" ]; then
-    find . -mindepth 1 \( -type d \( "${args[@]}" -name '.?*' \) -prune \) -o \( -type f -readable -printf '%P\0%s\0%T@\0' \) 2>/dev/null | base64
+    fp=${pfx//\\/\\\\}
+    fp=${fp//%/%%}
+    find . -mindepth 1 \( -type d \( "${args[@]}" -name '.?*' \) -prune \) -o \( -type f -readable -printf "$fp%P\0%s\0%T@\0" \) 2>/dev/null | "${cap[@]}" | base64
 else
+    n=0
     find . -mindepth 1 \( -type d \( "${args[@]}" -name '.?*' \) -prune \) -o \( -type f -print0 \) 2>/dev/null |
     while IFS= read -r -d '' f; do
         [ -r "$f" ] || continue
         s=$(stat -f '%z %m' "$f" 2>/dev/null) || continue
-        printf '%s\0%s\0%s\0' "${f#./}" "${s% *}" "${s#* }"
+        printf '%s\0%s\0%s\0' "$pfx${f#./}" "${s% *}" "${s#* }"
+        n=$((n + 1))
+        [ "${limit:-0}" -gt 0 ] && [ "$n" -gt "$limit" ] && break
     done | base64
 fi

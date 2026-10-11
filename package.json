@@ -1,6 +1,6 @@
 {
     "name": "@kedem/okcode",
-    "version": "0.1.1",
+    "version": "0.1.2",
     "description": "Agentless workspace tools: find, read and edit code by name in local or remote workspaces — indexed with okdb (symbols, full-text, embeddings), content never copied.",
     "main": "src/okcode.js",
     "bin": {

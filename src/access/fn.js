@@ -11,10 +11,12 @@
 //
 // Everything the contract asks of a facade that the host's functions may not
 // do themselves is done here: paths are checked (posix), a listing is
-// confined to `under`, skip names and dot-directories are pruned below it,
-// `limit` is honoured, and text comes back as Buffers.
+// confined to `under`, skip names and the fixed PRUNE_DOT_DIRS list are
+// pruned below it, `limit` is honoured, and text comes back as Buffers.
 
-const { checkPath, sha1, DEFAULT_SKIP } = require('./common');
+const { checkPath, sha1, DEFAULT_SKIP, PRUNE_DOT_DIRS } = require('./common');
+
+const PRUNE_DOT_DIRS_SET = new Set(PRUNE_DOT_DIRS);
 
 const toBuffer = (b) =>
     Buffer.isBuffer(b) ? b : b instanceof Uint8Array ? Buffer.from(b) : Buffer.from(String(b), 'utf8');
@@ -61,11 +63,14 @@ function fn({ list, read, stat = null, kind = 'fn', root = null } = {}) {
                 a.path < b.path ? -1 : a.path > b.path ? 1 : 0,
             )) {
                 if (base && r.path !== base && !r.path.startsWith(`${base}/`)) continue;
-                // Skip names and dot-directories apply BELOW `under`, never to
-                // its own segments (docs/ACCESS.md list()).
+                // Skip names and the FIXED PRUNE_DOT_DIRS list apply BELOW
+                // `under`, never to its own segments (docs/ACCESS.md
+                // list()) — not every dot-directory: `.github/`,
+                // `.storybook/` and the like are real source and must
+                // survive this, same as every other facade.
                 const below = (base && r.path !== base ? r.path.slice(base.length + 1) : base ? '' : r.path).split('/');
                 const dirs = below.slice(0, -1);
-                if (dirs.some((d) => names.has(d) || d.startsWith('.'))) continue;
+                if (dirs.some((d) => names.has(d) || PRUNE_DOT_DIRS_SET.has(d))) continue;
                 out.push(r);
                 if (limit && out.length >= limit) {
                     out.truncated = true;

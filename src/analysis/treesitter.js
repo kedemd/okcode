@@ -527,11 +527,24 @@ async function ensureLanguage(id) {
 // Called ahead of a batch of synchronous extract() calls — see the module
 // comment for why this is the seam. Distinct language ids only; already-
 // loaded (or already-failed) languages resolve immediately.
+// A JS-family path (`.js`/`.mjs`/`.cjs`/`.jsx` — parse.js's own `JS` set,
+// not duplicated by require() since treesitter.js must not depend on
+// parse.js, see langIdForPath's comment) might need the JSX fallback below
+// even though its own language id is null here: acorn cannot parse JSX, and
+// whether a given file CONTAINS any is exactly what acorn failing tells us,
+// too late to preload on demand from inside a synchronous extract() call.
+// Preloading 'typescript' (which carries both the .ts and .tsx grammars,
+// see LANGUAGES.typescript) for every JS-family file costs one extra
+// grammar load per process, paid once, regardless of how many of those
+// files actually turn out to need it.
+const JSX_FALLBACK_EXT = /\.(jsx|js|mjs|cjs)$/i;
+
 async function preload(paths) {
     const ids = new Set();
     for (const p of paths || []) {
         const id = langIdForPath(p);
         if (id) ids.add(id);
+        else if (JSX_FALLBACK_EXT.test(String(p))) ids.add('typescript');
     }
     await Promise.all([...ids].map(ensureLanguage));
 }
@@ -787,19 +800,33 @@ function widenToParent(node, widen) {
 function collectSyntaxErrors(tree) {
     const errors = [];
     const cursor = tree.walk();
-    function visit() {
-        const node = cursor.currentNode;
-        if (node.type === 'ERROR' || node.isMissing) {
-            errors.push({ start: node.startIndex, end: node.endIndex || node.startIndex + 1, isMissing: !!node.isMissing });
+    try {
+        function visit() {
+            const node = cursor.currentNode;
+            if (node.type === 'ERROR' || node.isMissing) {
+                errors.push({ start: node.startIndex, end: node.endIndex || node.startIndex + 1, isMissing: !!node.isMissing });
+            }
+            if (cursor.gotoFirstChild()) {
+                do {
+                    visit();
+                } while (cursor.gotoNextSibling());
+                cursor.gotoParent();
+            }
         }
-        if (cursor.gotoFirstChild()) {
-            do {
-                visit();
-            } while (cursor.gotoNextSibling());
-            cursor.gotoParent();
-        }
+        visit();
+    } finally {
+        // A TreeCursor holds its own native handle, separate from the
+        // Tree's — web-tree-sitter registers a FinalizationRegistry
+        // callback on it that frees that handle whenever GC collects the
+        // cursor, which can happen well AFTER this function returns. If
+        // `tree.delete()` has run by then (every caller here does exactly
+        // that once it is done extracting), that callback fires into
+        // already-freed WASM memory — "RuntimeError: memory access out of
+        // bounds", non-deterministically, on some unrelated later tick.
+        // Deleting the cursor here, before the caller can delete the tree,
+        // is what the automatic finalizer would otherwise do too late.
+        cursor.delete();
     }
-    visit();
     return errors;
 }
 
@@ -1068,20 +1095,128 @@ function extractFor(id, p, src) {
     if (!grammar || !cfg) return null;
     const parser = parserFor(grammar, cfg, p);
     const tree = parser.parse(src);
-    const { symbols, references } = buildSymbols(id, cfg, src, tree, queryFor(grammar, cfg, p));
-    const imports = buildImports(src, tree, importQueryFor(grammar, cfg, p));
-    // Syntax errors are NOT stored here — that is validate.js's syntaxDiagnostics()
-    // below, run fresh on whatever text is being validated (which is not
-    // always this same parse: a candidate edit's text never reaches extract()
-    // at all until it is committed). Keeping them out of the stored record
-    // also keeps a broken file's row the same size as a healthy one's.
-    return {
-        symbols,
-        imports,
-        exports: symbols.filter((s) => s.exported && !s.parent).map((s) => s.name),
-        references,
-        analyzerVersion: grammar.version,
-    };
+    try {
+        const { symbols, references } = buildSymbols(id, cfg, src, tree, queryFor(grammar, cfg, p));
+        const imports = buildImports(src, tree, importQueryFor(grammar, cfg, p));
+        // Syntax errors are NOT stored here — that is validate.js's syntaxDiagnostics()
+        // below, run fresh on whatever text is being validated (which is not
+        // always this same parse: a candidate edit's text never reaches extract()
+        // at all until it is committed). Keeping them out of the stored record
+        // also keeps a broken file's row the same size as a healthy one's.
+        return {
+            symbols,
+            imports,
+            exports: symbols.filter((s) => s.exported && !s.parent).map((s) => s.name),
+            references,
+            analyzerVersion: grammar.version,
+        };
+    } finally {
+        // A Tree holds its own slab of WASM memory until `.delete()`
+        // reclaims it — nothing above reads `tree` or any node derived from
+        // it after this returns (buildSymbols/buildImports only carry
+        // plain strings/numbers out), so it is safe to free here rather
+        // than leaving it for the WASM heap to never shrink. This single
+        // leak is most of the real-repo memory gap noted in DESIGN §12/13:
+        // indexing hundreds of tree-sitter files used to accumulate one
+        // undeleted Tree per file for the life of the process.
+        tree.delete();
+    }
+}
+
+// ── JSX fallback (acorn cannot parse JSX; the TSX grammar can) ────────────
+//
+// parse.js's acorn extractor is kept for every plain JS-family file — it is
+// richer (real parameter nodes, a tested factory/member walk) and acorn's
+// own failure is the ONLY signal that tells us a file needs this at all, so
+// there is no way to route .jsx straight here instead of trying acorn
+// first. When acorn throws, parse.js calls extractJsxFallback() below,
+// which forces the 'typescript' grammar's TSX parser/query regardless of
+// the path's own extension (.jsx/.js/.mjs/.cjs never match
+// LANGUAGES.typescript.tsxExts, so parserFor/queryFor's normal extension
+// check would pick the plain .ts grammar — wrong one, and JSX-blind).
+function jsxGrammar() {
+    const grammar = grammarCache.get('typescript');
+    return grammar && grammar.tsxParser ? grammar : null;
+}
+
+// validate.js's own gate: is there a loaded grammar to even ask? Distinct
+// from "diagnostics is empty" — that can mean "clean file" just as easily
+// as "nothing loaded", and the two must not be confused into a false "no
+// errors".
+function jsxGrammarAvailable() {
+    return !!jsxGrammar();
+}
+
+function extractJsxFallback(path, src) {
+    const grammar = jsxGrammar();
+    if (!grammar) return null;
+    const cfg = LANGUAGES.typescript;
+    const tree = grammar.tsxParser.parse(src);
+    try {
+        // Tree-sitter is error-tolerant: garbage input still returns a tree,
+        // just with ERROR/MISSING nodes scattered through it. A result from
+        // THAT is not "parsed" in the sense extract()'s callers mean — the
+        // same honesty the acorn path already gives a file it cannot
+        // parse — so the caller is told whether this parse was clean.
+        const hasErrors = collectSyntaxErrors(tree).length > 0;
+        const { symbols, references } = buildSymbols('typescript', cfg, src, tree, grammar.tsxQuery);
+        const imports = buildImports(src, tree, grammar.tsxImportQuery);
+        return {
+            symbols,
+            imports,
+            exports: symbols.filter((s) => s.exported && !s.parent).map((s) => s.name),
+            references,
+            analyzerVersion: grammar.version,
+            hasErrors,
+        };
+    } finally {
+        tree.delete();
+    }
+}
+
+// The edit-time gate's equivalent: ERROR/MISSING nodes for a JS-family
+// file's candidate text, via the same forced-TSX parse — used by
+// validate.js in place of (not alongside) acorn's own failure diagnostic
+// when acorn cannot parse the file at all, so a baseline that is legitimate
+// JSX does not permanently fail every edit on the "javascript-acorn"
+// validator alone (see validate.js for how the two are combined).
+function jsxSyntaxDiagnostics(text) {
+    const grammar = jsxGrammar();
+    if (!grammar) return [];
+    const tree = grammar.tsxParser.parse(text);
+    let errors;
+    try {
+        errors = collectSyntaxErrors(tree);
+    } finally {
+        tree.delete();
+    }
+    return errors.map((e) => {
+        const l1 = lineOf(text, e.start);
+        const l2 = lineOf(text, e.end);
+        return {
+            source: 'treesitter-syntax',
+            code: e.isMissing ? 'MISSING' : 'ERROR',
+            severity: 'error',
+            message: e.isMissing ? 'expected syntax is missing' : 'unexpected syntax',
+            start: e.start,
+            end: e.end,
+            line: l1,
+            column: colOf(text, e.start),
+            endLine: l2,
+        };
+    });
+}
+
+// Deterministic, like currentVersionFor — no runtime/grammar load needed,
+// so analyzerVersionFor (parse.js) can fold this into every JS-family
+// file's stamped version whether or not that particular file ever actually
+// falls back: bumping the TSX grammar (or its queries) must force those
+// files to reparse too, the same way it already does for real .tsx files.
+function jsxFallbackVersionTag() {
+    const cfg = LANGUAGES.typescript;
+    const man = loadManifest().typescript;
+    const none = requireRuntimeOnce() ? '' : ':none';
+    return `${manifestVersion(man)}:q${cfg.queryVersion}.${cfg.importQueryVersion || 0}${none}`;
 }
 
 // For validate.js (F2): ERROR/MISSING nodes as diagnostics, in the shared
@@ -1096,7 +1231,12 @@ function syntaxDiagnostics(p, text) {
     if (!grammar || !cfg) return [];
     const parser = parserFor(grammar, cfg, p);
     const tree = parser.parse(text);
-    const errors = collectSyntaxErrors(tree);
+    let errors;
+    try {
+        errors = collectSyntaxErrors(tree);
+    } finally {
+        tree.delete(); // see extractFor's matching comment — same leak, same fix
+    }
     return errors.map((e) => {
         const l1 = lineOf(text, e.start);
         const l2 = lineOf(text, e.end);
@@ -1146,5 +1286,9 @@ module.exports = {
     currentVersionFor,
     LANGUAGES,
     buildImports,
+    extractJsxFallback,
+    jsxSyntaxDiagnostics,
+    jsxFallbackVersionTag,
+    jsxGrammarAvailable,
     _resetForTest,
 };

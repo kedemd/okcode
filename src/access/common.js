@@ -10,7 +10,51 @@ const os = require('os');
 
 // Directories never worth listing. A dependency tree is read for its SURFACE
 // (package.json, types) by a separate pass, never walked to workspace depth.
+// Caller-overridable (`list({ skip })`) — a project that keeps real source
+// in one of these can pass its own set.
 const DEFAULT_SKIP = ['node_modules', '.git', '.idea', 'dist', 'build', 'coverage', '.next', 'vendor'];
+
+// Dot-directories known to hold tooling state, caches or vendored output —
+// never a caller's own source. Pruned BELOW the root by every facade, same
+// as a skip name, but NOT caller-overridable the way `skip` is: this used
+// to be "every dot-directory, no exceptions" (one `!name.startsWith('.')`
+// check), which quietly dropped real source a real project keeps in one —
+// Next.js' `app/.well-known/.../route.ts`, `.github/workflows/*.yml`,
+// `.storybook/`, `.husky/`. A fixed, named list plus `.gitignore` (already
+// honored at the root — see DESIGN §6) replaces that blanket rule: anything
+// NOT on this list is walked and left to `.gitignore` to decide.
+//
+// Kept here as the one canonical copy; the bash (`scripts/bash/list.sh`)
+// and PowerShell (`scripts/powershell/list.ps1`) scripts carry their own
+// literal copies (a shell script cannot `require()` this file) and
+// test/access-contract.test.js asserts all three stay in exact agreement —
+// update this list AND both scripts together.
+const PRUNE_DOT_DIRS = [
+    '.git',
+    '.hg',
+    '.svn',
+    '.okcode',
+    '.adcode',
+    '.next',
+    '.nuxt',
+    '.svelte-kit',
+    '.turbo',
+    '.cache',
+    '.parcel-cache',
+    '.venv',
+    '.tox',
+    '.mypy_cache',
+    '.pytest_cache',
+    '.ruff_cache',
+    '.gradle',
+    '.idea',
+    '.vs',
+    '.terraform',
+    '.serverless',
+    '.yarn',
+    '.pnpm-store',
+    '.expo',
+];
 
 const sha1 = (buf) => crypto.createHash('sha1').update(buf).digest('hex').toUpperCase();
 
@@ -149,4 +193,14 @@ async function acquireLock({ commit, read, remove, liveness, self }, lockPath, i
 
 const selfIdentity = () => ({ pid: process.pid, host: os.hostname(), startTime: procStartTime(process.pid) });
 
-module.exports = { DEFAULT_SKIP, sha1, checkPath, pathChecker, mtimeOf, procStartTime, acquireLock, selfIdentity };
+module.exports = {
+    DEFAULT_SKIP,
+    PRUNE_DOT_DIRS,
+    sha1,
+    checkPath,
+    pathChecker,
+    mtimeOf,
+    procStartTime,
+    acquireLock,
+    selfIdentity,
+};

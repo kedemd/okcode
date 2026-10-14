@@ -6,12 +6,18 @@
 #
 # Two rules here are load-bearing:
 #
-# DOT-DIRECTORIES ARE PRUNED BY THE WALK, not filtered afterwards — otherwise the
-# walk still descends every byte of .git or a working database directory. The
-# prune is anchored BELOW the root (we cd into the root and match `.?*`, which
-# needs two characters, so `.` itself never matches): a root that is itself a
-# dot directory must list normally, not prune the whole walk at its first step.
-#
+# A FIXED LIST OF KNOWN NON-SOURCE DOT-DIRECTORIES IS PRUNED BY THE WALK, not
+# filtered afterwards — otherwise the walk still descends every byte of .git
+# or a working database directory. Keep $dotprune in exact agreement with
+# common.js's PRUNE_DOT_DIRS and scripts/powershell/list.ps1's $dotPrune —
+# test/access-contract.test.js checks all three. Anything NOT on this list
+# (`.github/`, `.storybook/`, a `.well-known` route) is walked normally and
+# left to `.gitignore` to decide — this used to prune EVERY dot-directory
+# (`-name '.?*'`), which silently dropped real source projects keep in one.
+# The prune is anchored BELOW the root: a root that is itself a dot
+# directory must list normally, not prune the whole walk at its first step.
+dotprune=(.git .hg .svn .okcode .adcode .next .nuxt .svelte-kit .turbo .cache .parcel-cache .venv .tox .mypy_cache .pytest_cache .ruff_cache .gradle .idea .vs .terraform .serverless .yarn .pnpm-store .expo)
+
 # AN UNREADABLE FILE IS SKIPPED, NOT FATAL. A workspace containing a running
 # database, or any file another process holds locked, must cost that file and
 # nothing more — never the whole listing.
@@ -30,8 +36,20 @@
 # still caps.
 IFS= read -r -d '' under || exit 3
 IFS= read -r -d '' limit || exit 3
+names=("${dotprune[@]}")
+while IFS= read -r -d '' s; do names+=("$s"); done
+# Built with `-o` BETWEEN entries, never trailing — `names` is never empty
+# (dotprune alone guarantees that), but the old code's "always end in a
+# real `-name` anchor" trick (`-name '.?*'` as the fixed last alternative)
+# is gone now that the dot-prune list is itself just more names in this
+# same array, so a dangling trailing `-o` would otherwise be a find syntax
+# error.
 args=()
-while IFS= read -r -d '' s; do args+=(-name "$s" -o); done
+last=$((${#names[@]} - 1))
+for i in "${!names[@]}"; do
+    args+=(-name "${names[$i]}")
+    [ "$i" -lt "$last" ] && args+=(-o)
+done
 cap=(cat)
 if [ "${limit:-0}" -gt 0 ] 2>/dev/null && printf 'a\0' | head -z -n 1 >/dev/null 2>&1; then
     cap=(head -z -n $((3 * (limit + 1))))
@@ -60,10 +78,10 @@ fi
 if [ -n "$gnufind" ]; then
     fp=${pfx//\\/\\\\}
     fp=${fp//%/%%}
-    find . -mindepth 1 \( -type d \( "${args[@]}" -name '.?*' \) -prune \) -o \( -type f -readable -printf "$fp%P\0%s\0%T@\0" \) 2>/dev/null | "${cap[@]}" | base64
+    find . -mindepth 1 \( -type d \( "${args[@]}" \) -prune \) -o \( -type f -readable -printf "$fp%P\0%s\0%T@\0" \) 2>/dev/null | "${cap[@]}" | base64
 else
     n=0
-    find . -mindepth 1 \( -type d \( "${args[@]}" -name '.?*' \) -prune \) -o \( -type f -print0 \) 2>/dev/null |
+    find . -mindepth 1 \( -type d \( "${args[@]}" \) -prune \) -o \( -type f -print0 \) 2>/dev/null |
     while IFS= read -r -d '' f; do
         [ -r "$f" ] || continue
         s=$(stat -f '%z %m' "$f" 2>/dev/null) || continue

@@ -24,6 +24,7 @@
 const crypto = require('crypto');
 const pathPosix = require('path').posix;
 const { extract, langOf, isTextual, isSecret, analyzerVersionFor } = require('./analysis/parse');
+const { PRUNE_DOT_DIRS } = require('./access/common');
 const { extensionFor } = require('./analysis/extensions');
 const treesitter = require('./analysis/treesitter');
 const { createEdgeIndex } = require('./edges');
@@ -116,6 +117,16 @@ const sha1 = (buf) => crypto.createHash('sha1').update(buf).digest('hex').toUppe
 
 // okcode's own transient files never become part of the graph.
 const OWN_TRANSIENT = /(^|\/)\.okcode-tmp-|\.okcode-lock$/;
+
+// listTree()'s own belt-and-suspenders dot-directory filter (below) must
+// match the SAME fixed PRUNE_DOT_DIRS list the shipped access facades
+// already prune — this used to be a blanket `/(^|\/)\.[^/]+\//` (ANY
+// dot-directory, anywhere above a file), which re-dropped real source
+// (`.github/workflows/`, `app/.well-known/…`) a facade had already
+// correctly listed, undoing the facade-level fix for exactly the files
+// this was meant to only catch from a CUSTOM facade that skips its own
+// pruning.
+const DOT_PRUNE_RE = new RegExp(`(^|/)(${PRUNE_DOT_DIRS.map((d) => d.replace(/\./g, '\\.')).join('|')})/`);
 
 // A workspace's own .gitignore is the single source of truth for "not project
 // source" — reusing it beats maintaining a parallel exclusion list, and it is
@@ -681,11 +692,15 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
             access.read(['.gitignore']).catch(() => new Map()),
         ]);
         const gitignored = compileGitignore(gi.get('.gitignore') ? gi.get('.gitignore').toString('utf8') : '');
-        // Dot-directories BELOW the root are working state, not project (a
-        // workspace carried 13.4 MB of leftover LMDB in .smoke-data and
-        // friends). The shipped facades already prune them; a custom facade
-        // may not. .gitignore is the second filter, for a working-state
-        // directory with no leading dot.
+        // A FIXED list of known non-source dot-directories (DOT_PRUNE_RE,
+        // built from the same PRUNE_DOT_DIRS the shipped facades already
+        // prune — a workspace carried 13.4 MB of leftover LMDB in
+        // .smoke-data and friends) is pruned again here, for a CUSTOM
+        // facade that does not prune its own listing. Not every
+        // dot-directory: `.github/`, `.storybook/`, `app/.well-known/…`
+        // are real source and must survive this filter exactly as they
+        // survive the facade's. .gitignore is the second filter, for a
+        // working-state directory with no leading dot.
         //
         // A name the facade itself cannot address (its own dialect's path
         // rules: a Windows facade listing a name it would refuse) is skipped
@@ -702,11 +717,7 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
             }
         };
         return listed.filter(
-            (r) =>
-                !/(^|\/)\.[^/]+\//.test(r.path) &&
-                !OWN_TRANSIENT.test(r.path) &&
-                !gitignored(r.path) &&
-                addressable(r.path),
+            (r) => !DOT_PRUNE_RE.test(r.path) && !OWN_TRANSIENT.test(r.path) && !gitignored(r.path) && addressable(r.path),
         );
     }
 
@@ -1206,7 +1217,7 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
                 // A facade that ignores `under` hands back the whole tree:
                 // only the subtree counts, whatever arrived.
                 if (!inside(r.path, root)) continue;
-                if (/(^|\/)\.[^/]+\//.test(r.path) || OWN_TRANSIENT.test(r.path)) continue;
+                if (DOT_PRUNE_RE.test(r.path) || OWN_TRANSIENT.test(r.path)) continue;
                 if (!textualByPath(r.path, r.size) || isSecret(r.path)) continue;
                 seen.set(r.path, { rel: r.path, size: r.size, mtime: r.mtime });
             }

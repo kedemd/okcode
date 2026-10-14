@@ -2,11 +2,22 @@
 # none), then one skip-directory name per field.
 # stdout: base64 of NUL-separated (relpath, size, mtime-ticks) triples.
 #
-# The walk is explicit so pruning happens BEFORE descent: skip names and
-# dot-directories below the root are never entered (the root itself may be a
-# dot directory). Reparse points are not followed. AN UNREADABLE FILE IS
-# SKIPPED, NOT FATAL: a workspace holding a running database or any file
-# another process has locked must cost that file, never the whole listing.
+# The walk is explicit so pruning happens BEFORE descent: skip names and a
+# FIXED list of known non-source dot-directories ($dotPrune — tooling state,
+# caches, vendored output, never a caller's own source) below the root are
+# never entered (the root itself may be a dot directory). Anything NOT on
+# $dotPrune (`.github/`, `.storybook/`, a `.well-known` route) is walked
+# normally and left to `.gitignore` to decide — this used to prune EVERY
+# dot-directory (`$e.Name.StartsWith('.')`), which silently dropped real
+# source a real project keeps in one. Keep $dotPrune in exact agreement with
+# common.js's PRUNE_DOT_DIRS and scripts/bash/list.sh's $dotprune —
+# test/access-contract.test.js checks all three. Reparse points are not
+# followed. AN UNREADABLE FILE IS SKIPPED, NOT FATAL: a workspace holding a
+# running database or any file another process has locked must cost that
+# file, never the whole listing.
+$dotPrune = @('.git', '.hg', '.svn', '.okcode', '.adcode', '.next', '.nuxt', '.svelte-kit', '.turbo', '.cache', '.parcel-cache', '.venv', '.tox', '.mypy_cache', '.pytest_cache', '.ruff_cache', '.gradle', '.idea', '.vs', '.terraform', '.serverless', '.yarn', '.pnpm-store', '.expo')
+$dotPruneSet = @{}
+foreach ($d in $dotPrune) { $dotPruneSet[$d] = $true }
 #
 # A SUBTREE (`under`, a directory or one file) is walked from inside it, so
 # skip names and the dot-directory prune apply BELOW it, never to its own
@@ -53,7 +64,7 @@ while ($stack.Count -gt 0) {
     foreach ($e in $entries) {
         if ($e.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
         if ($e -is [IO.DirectoryInfo]) {
-            if (-not $skip.ContainsKey($e.Name) -and -not $e.Name.StartsWith('.')) { $stack.Push($e.FullName) }
+            if (-not $skip.ContainsKey($e.Name) -and -not $dotPruneSet.ContainsKey($e.Name)) { $stack.Push($e.FullName) }
             continue
         }
         try { $fs = [IO.File]::Open($e.FullName, 'Open', 'Read', 'ReadWrite'); $fs.Dispose() } catch { continue }

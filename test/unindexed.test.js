@@ -135,13 +135,17 @@ describe('regions(): the titled outline of a text without symbols', () => {
 describe('access.fn / access.memory: read-only facades', () => {
     it('memory: list (confined to under, limited), stat derived from list, read as Buffers, no commit', async () => {
         const map = memoryMap();
-        map.set('reads/.hidden/x.md', { bytes: 'x', mtime: 1 });
+        // `.git` is on the fixed PRUNE_DOT_DIRS list (pruned, like every
+        // other facade); `.storybook` is not — it is real source in a real
+        // project and must survive, same as local-fs/shell/fn all now agree.
+        map.set('reads/.git/x.md', { bytes: 'x', mtime: 1 });
+        map.set('reads/.storybook/main.md', { bytes: 's', mtime: 1 });
         map.set('reads/node_modules/y.md', { bytes: 'y', mtime: 1 });
         const a = okcode.access.memory(map);
         assert.equal(typeof a.commit, 'undefined');
         assert.deepEqual(
-            (await a.list()).map((r) => r.path),
-            ['reads/data.json', 'reads/guide.md', 'reads/run.txt'],
+            (await a.list()).map((r) => r.path).sort(),
+            ['reads/.storybook/main.md', 'reads/data.json', 'reads/guide.md', 'reads/run.txt'].sort(),
         );
         assert.deepEqual(
             (await a.list({ under: 'reads/guide.md' })).map((r) => r.path),

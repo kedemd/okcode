@@ -64,6 +64,15 @@ Why: symbols exist for JavaScript only (`registerExtractor('javascript', …)` i
 
 Also check `.ok` → `html` in `LANGS`: okjs's docs only use `.ok.js` / `.ok.html`.
 
+## Phase G (later) — grammars on demand
+
+v1 ships every grammar inside the package (`grammars/`, ~16 MB) — simple, and fine for today's hosts. Later, when okcode has users who want a light install or the set grows past ~50 MB:
+
+- Each language's grammar (`.wasm` + queries + LICENSE) is published on its own — a GitHub release asset or a small per-language npm package — and is no longer in okcode's tarball.
+- okcode's `grammars/manifest.json` pins, per language, the version, the URL and the **SHA-256** of each file. On the first file of a language, okcode fetches it, verifies the hash, and caches it (per user or per store); a file that fails verification is never loaded. Only bytes okcode shipped knowing about ever run.
+- Offline, unreachable or not yet fetched → exactly today's behaviour without that grammar ("searchable, no symbol extractor"), and a status line says which languages are pending. A host that must not fetch at runtime pre-installs them (`okcode grammars install [lang…]`) or points `grammarsDir` at its own copy.
+- Grammar upgrades bump the manifest; the existing analyzer-version rule reparses affected rows.
+
 ## Rules for every owner
 
 - Node ≥ 20, CommonJS, `node:test` + `node:assert/strict`, no new dependencies without the manager.

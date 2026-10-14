@@ -26,6 +26,14 @@ const OUT = path.join(ROOT, 'grammars');
 // project actually ships. `tagsLocal` is kept alongside (not generated) —
 // this script never overwrites it.
 const GRAMMARS = {
+    // tree-sitter-typescript's own tags.scm is written to be LAYERED on top
+    // of tree-sitter-javascript's (TypeScript's grammar is JavaScript's plus
+    // types): upstream's TS query only has interfaces and signature-only
+    // methods/functions, because the class/function/call captures already
+    // live in JS's tags.scm and upstream expects a consumer (GitHub code
+    // nav) to load both. We do the same — vendor JS's tags.scm too, as a
+    // second source into the same directory — rather than reimplement its
+    // captures (call expressions especially) in tags.local.scm.
     typescript: {
         pkg: 'tree-sitter-typescript',
         files: {
@@ -33,6 +41,13 @@ const GRAMMARS = {
             'tree-sitter-tsx.wasm': 'tree-sitter-tsx.wasm',
             'queries/tags.scm': 'tags.scm',
             LICENSE: 'LICENSE',
+        },
+        extra: {
+            pkg: 'tree-sitter-javascript',
+            files: {
+                'queries/tags.scm': 'tags.upstream-js.scm',
+                LICENSE: 'LICENSE.javascript',
+            },
         },
     },
     python: {
@@ -123,6 +138,17 @@ function main() {
             fs.copyFileSync(src, path.join(destDir, to));
         }
         manifest[lang] = { package: cfg.pkg, version: pkgJson.version };
+        if (cfg.extra) {
+            const extraDir = path.join(ROOT, 'node_modules', cfg.extra.pkg);
+            const extraPkgJson = JSON.parse(fs.readFileSync(path.join(extraDir, 'package.json'), 'utf8'));
+            for (const [from, to] of Object.entries(cfg.extra.files)) {
+                const src = path.join(extraDir, from);
+                if (!fs.existsSync(src)) throw new Error(`${cfg.extra.pkg}: missing ${from} — grammar package shape changed?`);
+                fs.copyFileSync(src, path.join(destDir, to));
+            }
+            manifest[lang].extra = { package: cfg.extra.pkg, version: extraPkgJson.version };
+            console.log(`  + ${lang}/tags.upstream-js.scm <- ${cfg.extra.pkg}@${extraPkgJson.version}`);
+        }
         console.log(`vendored ${lang} <- ${cfg.pkg}@${pkgJson.version}`);
     }
     fs.writeFileSync(path.join(OUT, 'manifest.json'), `${JSON.stringify(manifest, null, 4)}\n`);

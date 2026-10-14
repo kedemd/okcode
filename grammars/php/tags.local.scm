@@ -30,3 +30,29 @@
 ; gets its own capture so each keeps its own span.
 (const_element
   . (name) @name) @definition.constant
+
+; A plain function call, `helper(1)` — upstream's own `function_call_expression`
+; pattern only matches a NAMESPACED callee (`function: (qualified_name (name))`)
+; or a dynamic one (`function: (variable_name (name))`, `$fn()`); a bare,
+; unqualified call's `function:` field is just a `(name)` node directly, which
+; neither alternative matches, so `helper(1)` produced no reference at all
+; (`$o->m(2)` already works — upstream's own `member_call_expression` pattern
+; covers it).
+(function_call_expression
+  function: (name) @name) @reference.call
+
+; `define('FOO', 1)` — PHP's other constant form, a plain function call
+; rather than the `const` keyword `const_element` above already captures.
+; `#eq?` pins the callee to literally `define`; the FIRST argument's string
+; content becomes the symbol's name (`.` anchors there so a later argument
+; that happens to be a string, e.g. `define('FOO', 'bar')`'s value, is
+; never mistaken for the name). The whole call expression is the span, same
+; as any other top-level statement.
+(
+  (function_call_expression
+    function: (name) @_fn
+    arguments: (arguments
+      .
+      (argument (string (string_content) @name)))) @definition.constant
+  (#eq? @_fn "define")
+)

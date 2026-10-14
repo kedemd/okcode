@@ -43,3 +43,37 @@
   declarator: (qualified_identifier
     scope: (namespace_identifier) @parent
     name: (identifier) @name)) @definition.method
+
+; Call sites — upstream has no `@reference.call` at all. Same three shapes
+; as grammars/c/tags.local.scm (a plain call's callee is an `(identifier)`;
+; a member call's is a `field_expression`'s `field:`), plus C++'s own
+; namespace-qualified callee (`ns::fn()`), which parses as a
+; `qualified_identifier` the same way an out-of-line method's NAME does
+; above — here it is the whole call's callee, not a definition's.
+(call_expression
+  function: (identifier) @name) @reference.call
+
+(call_expression
+  function: (field_expression
+    field: (field_identifier) @name)) @reference.call
+
+(call_expression
+  function: (qualified_identifier
+    name: (identifier) @name)) @reference.call
+
+; File-scope globals (incl. `constexpr`, which this grammar files as just
+; another leading qualifier on the same `declaration` node, so no separate
+; pattern is needed for it) — see grammars/c/tags.local.scm's identical
+; pair for the two declarator shapes and the known pointer/array gap.
+; Restricted to a DIRECT child of `translation_unit`: a namespace's own
+; globals (`namespace ns { int y = 1; }`) are one level deeper still and
+; are not matched here, the same conservative, file-root-only scope
+; Rust's crate-root `const`/`static` override above draws.
+(translation_unit
+  (declaration
+    declarator: (identifier) @name) @definition.constant)
+
+(translation_unit
+  (declaration
+    declarator: (init_declarator
+      declarator: (identifier) @name)) @definition.constant)

@@ -87,8 +87,16 @@ function hitWithin(content, hits, within) {
         return { error: 'the `within` landmark itself occurs more than once — pick a more distinctive one' };
     const after = hits.filter((h) => h >= marks[0]);
     if (!after.length) {
+        // Never a wall of every occurrence — a common one-liner can repeat
+        // dozens of times in one file. Cap what is LISTED; always say the
+        // TOTAL (never silent about it), same convention workspace.js's
+        // own unbounded-list reasons use.
+        const lines = hits.map(lineOf);
+        const cap = 8;
+        const shown = lines.slice(0, cap).join(', ');
+        const more = lines.length > cap ? ` (showing ${cap} of ${lines.length})` : '';
         return {
-            error: `every occurrence of \`find\` sits ABOVE the landmark (landmark at line ${lineOf(marks[0])}, occurrences at lines ${hits.map(lineOf).join(', ')}) — \`within\` must be text above the edit site`,
+            error: `every occurrence of \`find\` sits ABOVE the landmark (landmark at line ${lineOf(marks[0])}, occurrences at lines ${shown}${more}) — \`within\` must be text above the edit site`,
         };
     }
     const hit = Math.min(...after);

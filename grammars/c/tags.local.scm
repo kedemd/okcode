@@ -22,3 +22,37 @@
 
 (preproc_function_def
   name: (identifier) @name) @definition.macro
+
+; Call sites — upstream has no `@reference.call` at all. A plain call
+; (`helper(1)`) has an `(identifier)` directly in `call_expression`'s
+; `function:` field; a call through a struct member (`o.m(2)`, `p->m(2)` —
+; the grammar uses the SAME `field_expression` node for both `.` and `->`)
+; has it nested one level under `field:`.
+(call_expression
+  function: (identifier) @name) @reference.call
+
+(call_expression
+  function: (field_expression
+    field: (field_identifier) @name)) @reference.call
+
+; File-scope globals — upstream has no idea a plain variable declaration
+; (as opposed to a function prototype, already covered by
+; `function_declarator`) is a symbol at all. `(translation_unit
+; (declaration ...))` restricts the match to a DIRECT child of the file's
+; root, the same bar every other language's top-level rule applies — a
+; local inside a function body is nested under `compound_statement`
+; instead, never a direct child of `translation_unit`. Two declarator
+; shapes: a plain `int counter;` (`declarator:` is the `(identifier)`
+; itself) and an initialised `int counter = 0;` (`declarator:` is an
+; `init_declarator` wrapping it) — `isExported`'s existing non-`static`
+; rule already applies unchanged (same `declaration` node either way).
+; Known gap: a pointer/array global (`int *p;`, `int a[3];`) nests the
+; identifier one level deeper still and is not matched here.
+(translation_unit
+  (declaration
+    declarator: (identifier) @name) @definition.constant)
+
+(translation_unit
+  (declaration
+    declarator: (init_declarator
+      declarator: (identifier) @name)) @definition.constant)

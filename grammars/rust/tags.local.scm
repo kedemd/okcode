@@ -16,3 +16,19 @@
   body: (declaration_list
     (function_item
       name: (identifier) @name) @definition.method))
+
+; Crate-root `const`/`static` — upstream has no idea either exists.
+; `(source_file (const_item ...))` restricts the match to a DIRECT child of
+; the file's root; Rust also allows a LOCAL `const`/`static` inside a
+; function body (same node types), which must stay unaddressed, same bar
+; every other language's top-level rule applies. Known, documented gap: a
+; `const`/`static` inside a `mod foo { ... }` block or an `impl` is outside
+; this pattern's reach (same conservative, file-root-only scope the module
+; resolver and `isExported` already draw elsewhere for Rust).
+(source_file
+  (const_item
+    name: (identifier) @name) @definition.constant)
+
+(source_file
+  (static_item
+    name: (identifier) @name) @definition.constant)

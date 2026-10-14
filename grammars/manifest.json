@@ -1,7 +1,11 @@
 {
     "typescript": {
         "package": "tree-sitter-typescript",
-        "version": "0.23.2"
+        "version": "0.23.2",
+        "extra": {
+            "package": "tree-sitter-javascript",
+            "version": "0.23.1"
+        }
     },
     "python": {
         "package": "tree-sitter-python",

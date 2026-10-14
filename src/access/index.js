@@ -6,6 +6,6 @@
 const { localFs } = require('./local-fs');
 const shell = require('./shell');
 const { fn, memory } = require('./fn');
-const { DEFAULT_SKIP } = require('./common');
+const { DEFAULT_SKIP, PRUNE_DOT_DIRS } = require('./common');
 
-module.exports = { localFs, shell, fn, memory, DEFAULT_SKIP };
+module.exports = { localFs, shell, fn, memory, DEFAULT_SKIP, PRUNE_DOT_DIRS };

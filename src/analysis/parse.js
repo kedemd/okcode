@@ -427,8 +427,61 @@ function extract(path, src) {
     // version is re-ingested on the next scan even when its hash never moved.
     const analyzerVersion = analyzerVersionFor(path);
     try {
-        return { path, lang, lines, ...extractor(path, src), analyzerVersion, parsed: true, indexed: true };
+        return {
+            path,
+            lang,
+            lines,
+            ...extractor(path, src),
+            analyzerVersion,
+            parsed: true,
+            indexed: true,
+            // Only stamped for JS-family files, where there are now TWO
+            // possible extractors — every other language here has exactly
+            // one, so saying which one ran would be noise, not information.
+            ...(lang === 'javascript' ? { extractor: 'acorn' } : {}),
+        };
     } catch (err) {
+        // acorn cannot parse JSX at all — not a rare malformed file, but
+        // every .jsx file and every .js/.mjs/.cjs file written with JSX in
+        // it, which is most React code. Before falling back, try the
+        // tree-sitter TSX grammar (treesitter.js's 'typescript' entry loads
+        // both .ts and .tsx wasm); acorn stays the ONLY path for a file it
+        // can actually parse — it is richer and already tested — so this
+        // only ever runs on acorn's failure, never instead of it.
+        // Acorn is strict in places tree-sitter's grammar is lenient — a
+        // doubled `,,` inside an object literal is a real SyntaxError to
+        // acorn (and to node) but tree-sitter's parser accepts it with no
+        // ERROR node at all. "tree-sitter parsed it cleanly" is therefore
+        // NOT by itself proof the file was JSX, not a bug — a cheap extra
+        // check is: does acorn's own failure position land on a `<`? Every
+        // JSX file acorn cannot parse fails AT the opening `<` of the first
+        // tag it meets (everything before that is ordinary JS, which acorn
+        // already parsed fine) — a real syntax error essentially never
+        // fails there, since `<` is also the less-than operator and valid
+        // in that position for an actual expression.
+        const looksLikeJsx = lang === 'javascript' && Number.isInteger(err.pos) && src[err.pos] === '<';
+        if (looksLikeJsx) {
+            const fallback = treesitter.extractJsxFallback(path, src);
+            // A clean tree-sitter parse (no ERROR/MISSING nodes) is treated
+            // as a real success; one that STILL has syntax errors (acorn's
+            // "function {{{" case, say) falls through to the same unparsed
+            // record as before — tree-sitter being error-tolerant must not
+            // turn a genuinely broken file into a falsely "parsed" one.
+            if (fallback && !fallback.hasErrors) {
+                const { hasErrors, ...rest } = fallback;
+                return {
+                    path,
+                    lang,
+                    lines,
+                    ...rest,
+                    analyzerVersion,
+                    parsed: true,
+                    indexed: true,
+                    extractor: 'treesitter-tsx',
+                    reason: 'acorn cannot parse JSX; extracted via the tree-sitter TSX grammar',
+                };
+            }
+        }
         return {
             path,
             lang,
@@ -449,11 +502,18 @@ function extract(path, src) {
 // see extract()). Bump JS_ANALYZER_VERSION whenever extractJavaScript starts
 // extracting something it used to miss: stores written before carry no
 // version, or an older one, and re-ingest those files once.
-const JS_ANALYZER_VERSION = 'js:2'; // 2: import names (incl. destructured require), call-site references (F3)
+const JS_ANALYZER_VERSION = 'js:3'; // 3: JSX fallback (tree-sitter TSX grammar) when acorn cannot parse — see extract()
 function analyzerVersionFor(path) {
     const ext = extensionFor(path);
     if (ext) return ext.version;
-    if (langOf(path) === 'javascript') return JS_ANALYZER_VERSION;
+    if (langOf(path) === 'javascript') {
+        // Folds in the TSX grammar/query version too: EVERY JS-family file
+        // is a candidate for the fallback (acorn failing is the only
+        // signal, discovered at parse time, not ahead of it), so a grammar
+        // or query bump must force a reparse of a plain, acorn-only file
+        // just as readily as one that actually uses the fallback today.
+        return `${JS_ANALYZER_VERSION}+jsx:${treesitter.jsxFallbackVersionTag()}`;
+    }
     return treesitter.currentVersionFor(path);
 }
 

@@ -8,7 +8,9 @@ const path = require('path');
 const crypto = require('crypto');
 const os = require('os');
 const { exec: cpExec } = require('child_process');
-const { DEFAULT_SKIP, sha1, pathChecker, mtimeOf, procStartTime, acquireLock, selfIdentity } = require('./common');
+const { DEFAULT_SKIP, PRUNE_DOT_DIRS, sha1, pathChecker, mtimeOf, procStartTime, acquireLock, selfIdentity } = require('./common');
+
+const PRUNE_DOT_DIRS_SET = new Set(PRUNE_DOT_DIRS);
 
 const tmpName = () => `.okcode-tmp-${process.pid}-${crypto.randomBytes(6).toString('hex')}`;
 
@@ -84,10 +86,15 @@ function localFs(root) {
                 return out;
             }
         }
-        // Same two rules as the shell dialects: dot-directories BELOW the root
-        // (and skip names at any depth) are pruned by the walk itself — never
-        // descended — and an entry that cannot be read costs itself alone,
-        // never the listing. The root may itself be a dot directory. Symlinks
+        // Same two rules as the shell dialects: a FIXED list of known
+        // non-source dot-directories (PRUNE_DOT_DIRS — tooling state,
+        // caches, vendored output, never a caller's own source) BELOW the
+        // root, and skip names, at any depth, are pruned by the walk
+        // itself — never descended — and an entry that cannot be read
+        // costs itself alone, never the listing. Everything else under a
+        // dot-directory (`.github/workflows/`, `.storybook/`, a `.well-
+        // known` route) is walked normally and left to `.gitignore` (DESIGN
+        // §6) to decide. The root may itself be a dot directory. Symlinks
         // are not followed (no cycles, no walking out of the root).
         async function walk(dirAbs, dirRel) {
             if (out.length > cap) return;
@@ -103,7 +110,7 @@ function localFs(root) {
                     const rel = dirRel ? `${dirRel}/${e.name}` : e.name;
                     const full = path.join(dirAbs, e.name);
                     if (e.isDirectory()) {
-                        if (!skipSet.has(e.name) && !e.name.startsWith('.')) subdirs.push([full, rel]);
+                        if (!skipSet.has(e.name) && !PRUNE_DOT_DIRS_SET.has(e.name)) subdirs.push([full, rel]);
                         return;
                     }
                     if (!e.isFile()) return;

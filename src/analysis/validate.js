@@ -213,12 +213,39 @@ function validateSource({ rel, text, moduleKind = 'ambiguous', palette = [] }) {
 
     if (isJS) {
         const acornResult = tryAcorn(text, moduleKind);
+        // JSX: acorn cannot parse it at all, which used to mean every edit
+        // to a .jsx file (or a .js file written with JSX in it) permanently
+        // failed this gate — the BASELINE itself never passes acorn, so
+        // "acorn failed" can never be a trustworthy signal of what the edit
+        // did. Three guards before treating it as JSX rather than a real
+        // error: (1) `acornResult` reflects the CALLER's moduleKind (a
+        // top-level `await` fails under 'commonjs' on purpose — that is
+        // the gate doing its job, not JSX), so `tryAcorn(text, 'ambiguous')`
+        // — both 'script' and 'module' — must ALSO fail before this is
+        // "acorn cannot parse this at all" rather than a moduleKind
+        // mismatch; (2) acorn's own failure position must land on a `<` —
+        // the JSX signature (see parse.js's extract(), same check, same
+        // reasoning: a doubled `,,` inside an object literal is a real
+        // SyntaxError to acorn that tree-sitter's grammar accepts with no
+        // ERROR node at all, so "tree-sitter is clean" alone is not proof
+        // of JSX); (3) tree-sitter's OWN parse of the exact same text must
+        // THEN also be clean (no ERROR/MISSING) — a file broken under both
+        // parsers (acorn's existing "function {{{" case) still reports
+        // acorn's own diagnostic, unchanged, so a genuinely malformed .js
+        // file is not quietly waved through just because the TSX grammar
+        // happens to be loaded in this process.
+        const unparseableByAcorn = !acornResult.ok && !tryAcorn(text, 'ambiguous').ok;
+        const looksLikeJsx =
+            unparseableByAcorn && acornResult.err && Number.isInteger(acornResult.err.pos) && text[acornResult.err.pos] === '<';
+        const jsxDiagnostics = looksLikeJsx && treesitter.jsxGrammarAvailable() ? treesitter.jsxSyntaxDiagnostics(text) : null;
+        const jsxFallback = !!jsxDiagnostics && jsxDiagnostics.length === 0;
         validators.push({
             validator: 'javascript-acorn',
-            status: acornResult.ok ? 'passed' : 'failed',
-            covers: fullSpan,
+            status: acornResult.ok ? 'passed' : jsxFallback ? 'skipped' : 'failed',
+            covers: acornResult.ok ? fullSpan : [],
+            ...(jsxFallback ? { note: 'acorn cannot parse JSX; using tree-sitter-syntax instead' } : {}),
         });
-        if (!acornResult.ok && acornResult.err) {
+        if (!acornResult.ok && !jsxFallback && acornResult.err) {
             const pos = Number.isInteger(acornResult.err.pos) ? acornResult.err.pos : 0;
             const { line, column } = lineColAt(text, pos);
             diagnostics.push({
@@ -233,21 +260,31 @@ function validateSource({ rel, text, moduleKind = 'ambiguous', palette = [] }) {
             });
         }
 
-        const nc = nodeCheck(text, moduleKind);
-        validators.push({ validator: 'javascript-node-check', status: nc.ok ? 'passed' : 'failed', covers: fullSpan });
-        if (!nc.ok && nc.res) {
-            const parsed = parseNodeCheckOutput(nc.res.stderr);
-            const offset = offsetAtLineCol(text, parsed.line, parsed.column);
-            diagnostics.push({
-                source: 'javascript-node-check',
-                code: parsed.code,
-                severity: 'error',
-                message: parsed.message,
-                start: offset,
-                end: offset,
-                line: parsed.line,
-                column: parsed.column,
+        if (jsxFallback) {
+            validators.push({
+                validator: 'javascript-node-check',
+                status: 'skipped',
+                covers: [],
+                note: 'skipped: acorn cannot parse JSX, node --check would fail the same way',
             });
+            validators.push({ validator: 'treesitter-syntax', status: 'passed', covers: fullSpan });
+        } else {
+            const nc = nodeCheck(text, moduleKind);
+            validators.push({ validator: 'javascript-node-check', status: nc.ok ? 'passed' : 'failed', covers: fullSpan });
+            if (!nc.ok && nc.res) {
+                const parsed = parseNodeCheckOutput(nc.res.stderr);
+                const offset = offsetAtLineCol(text, parsed.line, parsed.column);
+                diagnostics.push({
+                    source: 'javascript-node-check',
+                    code: parsed.code,
+                    severity: 'error',
+                    message: parsed.message,
+                    start: offset,
+                    end: offset,
+                    line: parsed.line,
+                    column: parsed.column,
+                });
+            }
         }
 
         // Tag balance inside template literals — the one structural claim the
@@ -406,12 +443,29 @@ async function validateSourceAsync({ rel, text, moduleKind = 'ambiguous', palett
 
     if (isJS) {
         const acornResult = tryAcorn(text, moduleKind);
+        // Same JSX fallback as validateSource above (keep both in sync —
+        // see that function's two-guard comment for why acorn's own
+        // failure alone is not enough: a moduleKind mismatch, like a
+        // top-level `await` under 'commonjs', must still fail here, not
+        // be mistaken for JSX). Unlike the sync version, this one CAN load
+        // the grammar on demand — it is already async — so a cold process
+        // validating its first .jsx edit still gets the real check rather
+        // than silently skipping it.
+        const unparseableByAcorn = !acornResult.ok && !tryAcorn(text, 'ambiguous').ok;
+        // Same `<`-position check as validateSource (see its comment) —
+        // tree-sitter alone is too lenient to trust by itself.
+        const looksLikeJsx =
+            unparseableByAcorn && acornResult.err && Number.isInteger(acornResult.err.pos) && text[acornResult.err.pos] === '<';
+        if (looksLikeJsx) await treesitter.ensureLanguage('typescript');
+        const jsxDiagnostics = looksLikeJsx && treesitter.jsxGrammarAvailable() ? treesitter.jsxSyntaxDiagnostics(text) : null;
+        const jsxFallback = !!jsxDiagnostics && jsxDiagnostics.length === 0;
         validators.push({
             validator: 'javascript-acorn',
-            status: acornResult.ok ? 'passed' : 'failed',
-            covers: fullSpan,
+            status: acornResult.ok ? 'passed' : jsxFallback ? 'skipped' : 'failed',
+            covers: acornResult.ok ? fullSpan : [],
+            ...(jsxFallback ? { note: 'acorn cannot parse JSX; using tree-sitter-syntax instead' } : {}),
         });
-        if (!acornResult.ok && acornResult.err) {
+        if (!acornResult.ok && !jsxFallback && acornResult.err) {
             const pos = Number.isInteger(acornResult.err.pos) ? acornResult.err.pos : 0;
             const { line, column } = lineColAt(text, pos);
             diagnostics.push({
@@ -426,21 +480,31 @@ async function validateSourceAsync({ rel, text, moduleKind = 'ambiguous', palett
             });
         }
 
-        const nc = await nodeCheckAsync(text, moduleKind);
-        validators.push({ validator: 'javascript-node-check', status: nc.ok ? 'passed' : 'failed', covers: fullSpan });
-        if (!nc.ok && nc.res) {
-            const parsed = parseNodeCheckOutput(nc.res.stderr);
-            const offset = offsetAtLineCol(text, parsed.line, parsed.column);
-            diagnostics.push({
-                source: 'javascript-node-check',
-                code: parsed.code,
-                severity: 'error',
-                message: parsed.message,
-                start: offset,
-                end: offset,
-                line: parsed.line,
-                column: parsed.column,
+        if (jsxFallback) {
+            validators.push({
+                validator: 'javascript-node-check',
+                status: 'skipped',
+                covers: [],
+                note: 'skipped: acorn cannot parse JSX, node --check would fail the same way',
             });
+            validators.push({ validator: 'treesitter-syntax', status: 'passed', covers: fullSpan });
+        } else {
+            const nc = await nodeCheckAsync(text, moduleKind);
+            validators.push({ validator: 'javascript-node-check', status: nc.ok ? 'passed' : 'failed', covers: fullSpan });
+            if (!nc.ok && nc.res) {
+                const parsed = parseNodeCheckOutput(nc.res.stderr);
+                const offset = offsetAtLineCol(text, parsed.line, parsed.column);
+                diagnostics.push({
+                    source: 'javascript-node-check',
+                    code: parsed.code,
+                    severity: 'error',
+                    message: parsed.message,
+                    start: offset,
+                    end: offset,
+                    line: parsed.line,
+                    column: parsed.column,
+                });
+            }
         }
 
         try {

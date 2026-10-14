@@ -67,8 +67,8 @@ describe('decorators/attributes belong to the symbol they decorate', () => {
         const outline = await ws.outline('app.py');
         const sym = outline.symbols.find((s) => s.name === 'get_user');
         assert.equal(sym.lineStart, 1);
-        // The SIGNATURE is still the def's own first line, not the decorator.
-        assert.equal(sym.signature, 'def get_user():');
+        // The SIGNATURE is the full def up to the body, trailing ':' trimmed.
+        assert.equal(sym.signature, 'def get_user()');
     });
 
     it('TypeScript: a method\'s/property\'s decorator (a sibling, not a child) extends the stored span backward', async () => {
@@ -82,7 +82,7 @@ describe('decorators/attributes belong to the symbol they decorate', () => {
         assert.ok(r.body.startsWith('@Log()'), r.body);
         const outline = await ws.outline('foo.ts');
         const sym = outline.symbols.find((s) => s.path === 'Foo.baz');
-        assert.equal(sym.signature, 'baz() {');
+        assert.equal(sym.signature, 'baz()');
     });
 
     it('Rust: outer attributes (`#[derive]`, `#[test]`) as preceding siblings extend the stored span', async () => {
@@ -95,7 +95,7 @@ describe('decorators/attributes belong to the symbol they decorate', () => {
         assert.ok(r.body.includes('#[test]'));
         const outline = await ws.outline('lib.rs');
         const sym = outline.symbols.find((s) => s.name === 'foo');
-        assert.equal(sym.signature, 'pub fn foo() -> i32 {');
+        assert.equal(sym.signature, 'pub fn foo() -> i32');
     });
 
     it('PHP: an attribute is already part of the node\'s own span; read() shows it and the signature still skips it', async () => {
@@ -109,7 +109,7 @@ describe('decorators/attributes belong to the symbol they decorate', () => {
         assert.ok(r.body.startsWith('#[Deprecated]'), r.body);
         const outline = await ws.outline('user.php');
         const sym = outline.symbols.find((s) => s.path === 'User.getName');
-        assert.equal(sym.signature, 'public function getName() {');
+        assert.equal(sym.signature, 'public function getName()');
     });
 
     it('editBatch by symbol name still works, and a replacement body that OMITS the decorator removes it — the span is the source of truth', async () => {

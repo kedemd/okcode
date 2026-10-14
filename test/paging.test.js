@@ -148,6 +148,39 @@ describe('paging: refs/find/mentions/importers never cut silently', () => {
         assert.equal(seen.size, N, 'every definition reached across pages');
     });
 
+    it('find: a path-scoped search ranks the FULL set of matches inside the path, not an undersized inner window', async () => {
+        const { root } = tmpRoot('find-path-page');
+        fs.mkdirSync(path.join(root, 'inside'), { recursive: true });
+        // The old code fetched an inner window of `max((off+limit)*5, 200)`
+        // top-ranked hits BEFORE filtering by path — so enough outranking
+        // noise outside the path could push every real hit out of that
+        // window, reporting `total: 0` for a path that actually has
+        // matches. Every noise symbol here ties on SCORE (exact name match)
+        // with every path symbol, so the tiebreak (smaller span first) is
+        // what decides order: 220 one-line noise symbols (span 1) all rank
+        // ahead of the path's own symbols (span 5, deliberately larger),
+        // well past the old 200-row window.
+        const NOISE = 220;
+        for (let i = 0; i < NOISE; i++) {
+            fs.writeFileSync(path.join(root, `noise${i}.js`), 'function targetSym() { return 1; }\n');
+        }
+        const INSIDE = 3;
+        for (let i = 0; i < INSIDE; i++) {
+            fs.writeFileSync(
+                path.join(root, 'inside', `f${i}.js`),
+                ['function targetSym() {', '  const a = 1;', '  const b = 2;', '  return a + b;', '}', ''].join('\n'),
+            );
+        }
+        const ws = await openOn(root);
+        await ws.sync();
+
+        const hits = await ws.find('targetSym', { path: 'inside', limit: 10 });
+        assert.equal(hits.total, INSIDE, JSON.stringify({ total: hits.total, capped: hits.capped }));
+        assert.equal(hits.length, INSIDE);
+        assert.equal(hits.truncated, false);
+        assert.ok(hits.every((h) => h.file.startsWith('inside/')));
+    });
+
     it('importers: paging is exact and offers the exact continuation', async () => {
         const { root } = tmpRoot('importers-page');
         fs.mkdirSync(root, { recursive: true });

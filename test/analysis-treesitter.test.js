@@ -291,7 +291,7 @@ test('TypeScript: class/function/arrow-const/type/enum/method — all of upstrea
     assert.equal(byPath.get('Circle.area').kind, 'method');
     assert.equal(byPath.get('Circle.area').doc, 'method doc');
     // Nested function inside a method, by containment — same rule as acorn's.
-    assert.equal(byPath.get('area.helper').parent, 'area');
+    assert.equal(byPath.get('Circle.area.helper').parent, 'Circle.area');
     assert.equal(byPath.get('Point').kind, 'type');
     assert.ok(byPath.get('Point').exported);
     assert.equal(byPath.get('makeCircle').kind, 'function'); // export const f = (...) => ...
@@ -312,7 +312,7 @@ test('Python: docstring override (class own vs nested method), underscore conven
     // The class's own docstring must not leak onto a nested method's doc,
     // and vice versa — each is owned by its SMALLEST enclosing definition.
     assert.notEqual(byPath.get('Animal').doc, byPath.get('Animal.speak').doc);
-    assert.equal(byPath.get('speak.inner_helper').doc, '');
+    assert.equal(byPath.get('Animal.speak.inner_helper').doc, '');
     assert.ok(byPath.get('make_animal').exported);
     assert.equal(byPath.get('make_animal').doc, 'Factory function.');
     assert.ok(byPath.get('CONST_VALUE').exported);
@@ -409,12 +409,12 @@ test('C#: namespace/struct/enum/class/method/property — dotted namespace conta
     assert.equal(byPath.get('App.Models.Color').kind, 'enum');
     assert.equal(byPath.get('App.Models.User').kind, 'class');
     assert.equal(byPath.get('App.Models.User').doc, 'The user class.');
-    assert.equal(byPath.get('User.GetName').kind, 'method');
-    assert.equal(byPath.get('User.GetName').parent, 'User');
-    assert.ok(byPath.get('User.GetName').exported, 'public method');
-    assert.equal(byPath.get('User.Age').kind, 'property');
-    assert.ok(byPath.get('User.Age').exported);
-    assert.ok(!byPath.get('User.Secret').exported, 'private method');
+    assert.equal(byPath.get('App.Models.User.GetName').kind, 'method');
+    assert.equal(byPath.get('App.Models.User.GetName').parent, 'App.Models.User');
+    assert.ok(byPath.get('App.Models.User.GetName').exported, 'public method');
+    assert.equal(byPath.get('App.Models.User.Age').kind, 'property');
+    assert.ok(byPath.get('App.Models.User.Age').exported);
+    assert.ok(!byPath.get('App.Models.User.Secret').exported, 'private method');
     assert.equal(r.analyzerVersion, treesitter.currentVersionFor('sample.cs'));
 });
 
@@ -445,7 +445,8 @@ test('C++: namespace/class/method (in-class and out-of-line)/enum/template/attri
     const bars = r.symbols.filter((s) => s.name === 'bar');
     assert.equal(bars.length, 2, 'the in-class prototype AND the out-of-line definition are both symbols');
     assert.ok(bars.every((s) => s.kind === 'method' && s.parent === 'Box'));
-    const outOfLine = bars.find((s) => s.signature.includes('return'));
+    // The signature stops at the body now; the SPAN is what carries it.
+    const outOfLine = bars.find((s) => CPP.slice(s.start, s.end).includes('return'));
     assert.ok(outOfLine, 'the out-of-line definition carries the full widened span, body included');
     assert.equal(byPath.get('App').kind, 'module');
     assert.equal(byPath.get('App.Color').kind, 'enum');
@@ -589,4 +590,12 @@ test('runtime unavailable (injected loader): extract() degrades to "searchable, 
             ['typescript', 'python', 'go', 'rust', 'php', 'java', 'csharp', 'c', 'cpp'].map((id) => treesitter.ensureLanguage(id)),
         );
     }
+});
+
+test('.h: parsed with the C++ grammar — a C++ header keeps its classes and full paths, a C header still parses', () => {
+    assert.equal(langOf('box.h'), 'cpp');
+    const cpp = extract('box.h', 'namespace App {\nclass Box {\npublic:\n  void bar();\n};\n}\n');
+    assert.deepEqual(cpp.symbols.map((s) => s.path), ['App', 'App.Box', 'App.Box.bar']);
+    const c = extract('util.h', '#define MAX 3\nint add(int a, int b);\n');
+    assert.deepEqual(c.symbols.map((s) => s.name).sort(), ['MAX', 'add']);
 });

@@ -70,7 +70,7 @@ const LANGUAGES = {
         // full-signature fix (DESIGN §12): `signature` used to be just the
         // definition's first source line, truncating a multi-line parameter
         // list.
-        queryVersion: 3,
+        queryVersion: 4,
         importQueryVersion: 1,
         comment: { line: '//', blockOpen: '/*', blockClose: '*/' },
         // `export` wraps the declaration one level up (`export class C {}`
@@ -93,7 +93,7 @@ const LANGUAGES = {
         wasm: 'tree-sitter-python.wasm',
         // Bumped for the decorator-span fix, then again for the
         // full-signature fix — see the typescript entry above.
-        queryVersion: 3,
+        queryVersion: 4,
         importQueryVersion: 1,
         comment: { line: '#' },
         // PEP 8 convention, not syntax: a single leading underscore means
@@ -117,7 +117,7 @@ const LANGUAGES = {
         wasm: 'tree-sitter-go.wasm',
         // Bumped for the full-signature fix — see the typescript entry
         // above.
-        queryVersion: 2,
+        queryVersion: 3,
         importQueryVersion: 1,
         comment: { line: '//' },
         // Go's own export rule IS syntax: capitalised identifiers are
@@ -131,7 +131,7 @@ const LANGUAGES = {
         wasm: 'tree-sitter-rust.wasm',
         // Bumped for the decorator-span fix, then again for the
         // full-signature fix — see the typescript entry above.
-        queryVersion: 3,
+        queryVersion: 4,
         importQueryVersion: 1,
         comment: { line: '//' },
         isExported(defNode) {
@@ -154,7 +154,7 @@ const LANGUAGES = {
         wasm: 'tree-sitter-php.wasm',
         // Bumped for the full-signature fix — see the typescript entry
         // above.
-        queryVersion: 2,
+        queryVersion: 3,
         importQueryVersion: 1,
         comment: { line: '//', blockOpen: '/*', blockClose: '*/' },
         // PHP's own visibility IS the export rule for a class member: no
@@ -183,7 +183,7 @@ const LANGUAGES = {
     java: {
         exts: ['.java'],
         wasm: 'tree-sitter-java.wasm',
-        queryVersion: 1,
+        queryVersion: 2,
         importQueryVersion: 1,
         comment: { line: '//', blockOpen: '/*', blockClose: '*/' },
         // Java's own visibility IS the export rule, same shape Go's
@@ -217,7 +217,7 @@ const LANGUAGES = {
     csharp: {
         exts: ['.cs'],
         wasm: 'tree-sitter-c_sharp.wasm',
-        queryVersion: 1,
+        queryVersion: 2,
         importQueryVersion: 1,
         comment: { line: '//', blockOpen: '/*', blockClose: '*/' },
         // Same "explicit `public` or nothing" rule as Java above; C#'s
@@ -248,9 +248,9 @@ const LANGUAGES = {
     // (called from many places with no workspace in hand) to stop being a
     // static extension map, which is a bigger change than this gap justifies.
     c: {
-        exts: ['.c', '.h'],
+        exts: ['.c'],
         wasm: 'tree-sitter-c.wasm',
-        queryVersion: 1,
+        queryVersion: 2,
         importQueryVersion: 1,
         comment: { line: '//', blockOpen: '/*', blockClose: '*/' },
         // Unlike every other language here, this grammar's own
@@ -279,9 +279,12 @@ const LANGUAGES = {
         },
     },
     cpp: {
-        exts: ['.cpp', '.cc', '.cxx', '.hpp', '.hh', '.hxx', '.ipp'],
+        // `.h` too: tree-sitter's C++ grammar is built on its C grammar, so a C
+        // header parses the same, while a C++ header (classes, namespaces,
+        // templates) under the C grammar is a wall of syntax errors.
+        exts: ['.cpp', '.cc', '.cxx', '.h', '.hpp', '.hh', '.hxx', '.ipp'],
         wasm: 'tree-sitter-cpp.wasm',
-        queryVersion: 1,
+        queryVersion: 2,
         importQueryVersion: 1,
         comment: { line: '//', blockOpen: '/*', blockClose: '*/' },
         // Same declarator/definition split as C above — see that entry's
@@ -841,7 +844,19 @@ function buildSymbols(id, cfg, src, tree, query) {
                 if (!parent || other.end - other.start < parent.end - parent.start) parent = other;
             }
         }
-        d.parent = parent ? parent.name : null;
+        d.parentDef = parent;
+        d.parent = null;
+    }
+    // A path is the WHOLE chain (`App.Box.bar`), and `parent` is the
+    // parent's path, as in parse.js's JS extractor: the parent's own name
+    // alone loses every level above it. Sorted by start, a container is
+    // always settled before what it contains.
+    for (const d of defs) {
+        if (d.explicitParent) d.path = `${d.explicitParent}.${d.name}`;
+        else if (d.parentDef) {
+            d.parent = d.parentDef.path;
+            d.path = `${d.parent}.${d.name}`;
+        } else d.path = d.name;
     }
 
     // Doc fallback, in order: the same-match @doc capture (already merged
@@ -869,7 +884,7 @@ function buildSymbols(id, cfg, src, tree, query) {
     const symbols = defs.map((d) => ({
         name: d.name,
         kind: d.kind,
-        path: d.parent ? `${d.parent}.${d.name}` : d.name,
+        path: d.path,
         ...(d.parent ? { parent: d.parent } : {}),
         start: d.start,
         end: d.end,

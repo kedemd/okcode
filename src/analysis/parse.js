@@ -75,7 +75,7 @@ const LANGS = {
     // LANGUAGES entry for why (and the documented limitation for a
     // project whose `.h` files are actually C++).
     '.c': 'c',
-    '.h': 'c',
+    '.h': 'cpp', // see treesitter.js: the C++ grammar parses C headers too
     '.cpp': 'cpp',
     '.cc': 'cpp',
     '.cxx': 'cpp',

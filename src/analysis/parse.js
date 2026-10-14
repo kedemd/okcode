@@ -562,6 +562,20 @@ function extractJavaScript(path, src) {
                 });
                 descend(decl, child, depth + 1);
                 exports.push(isDefault ? 'default' : decl.id.name);
+            } else if (decl && decl.type === 'ObjectExpression') {
+                // `export default { ... }` — the object has no `.id`, so
+                // nothing is pushed for the export itself (same as any other
+                // anonymous default), but its function-valued members ARE
+                // addressable, same as `members()` already makes a factory's
+                // RETURNED object addressable. Before this, an object like
+                // this (which is exactly what an OKJS component is) produced
+                // zero symbols — ext-okjs.js's "one symbol per component"
+                // gap started here. Only function-valued members earn a
+                // name, the same rule `members()` applies everywhere else:
+                // a plain data property (`tag: 'x'`, a template literal) is
+                // not something a caller addresses by name.
+                members(decl, null, depth);
+                if (isDefault) exports.push('default');
             } else if (isDefault) exports.push('default');
             for (const s of node.specifiers || []) if (s.exported) exports.push(s.exported.name || s.exported.value);
             if (node.source)
@@ -630,4 +644,19 @@ for (const id of ['typescript', 'python', 'go', 'rust']) {
     });
 }
 
-module.exports = { extract, langOf, extOf, isTextual, isSecret, registerExtractor, TEXT_MAX, parseSource };
+module.exports = {
+    extract,
+    langOf,
+    extOf,
+    isTextual,
+    isSecret,
+    registerExtractor,
+    TEXT_MAX,
+    parseSource,
+    // Exposed so ext-okjs.js can run the SAME generic extractor on a
+    // `.ok.js`/`.ok.mjs` file's JavaScript (or a `.ok.html` file's <script>
+    // block) and nest its symbols under the component tag — required
+    // lazily there, never at this module's own load time, since this file
+    // requires ext-okjs.js above to register it.
+    extractJavaScript,
+};

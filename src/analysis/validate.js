@@ -376,6 +376,9 @@ async function validateSourceAsync({ rel, text, moduleKind = 'ambiguous', palett
     const isJS = langOf(rel) === 'javascript';
     const ext = extensionFor(rel);
     const tsLang = treesitter.langIdForPath(rel);
+    // The edit gate must not depend on whether a scan happened to load this
+    // grammar in this process (a warm store reparses nothing): load it here.
+    if (tsLang) await treesitter.preload([rel]);
     if (!isJS && !ext && !tsLang) {
         return {
             validators: [{ validator: 'none', status: 'skipped', covers: [] }],
@@ -471,7 +474,7 @@ async function validateSourceAsync({ rel, text, moduleKind = 'ambiguous', palett
     // The tree-sitter syntax gate (F2): ERROR/MISSING nodes from the SAME
     // generic extractor F1 uses, for every tree-sitter language alike. Only
     // produces diagnostics when that language's grammar is ALREADY loaded in
-    // this process (treesitter.preload(), run by workspace.js's scan) —
+    // this process (preloaded above for this path) —
     // absent the optional runtime or a grammar, this is [] and the file is
     // validated exactly as it is today: not at all, by this gate.
     if (tsLang) {

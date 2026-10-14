@@ -2,8 +2,13 @@
 // The one registrant, today, of the generic extension registry (extensions.js).
 // Everything OKJS-specific lives HERE and nowhere else in the code index —
 // the workspace, parse.js and validate.js only ever see the normalised envelope
-// this file produces (symbols/imports/exports, plus regions/diagnostics/
-// coverage/the raw analysis riding along), never OKJS syntax itself.
+// this file produces: symbols/imports/exports (symbols include the component
+// tag AND, nested under it, the generic acorn extractor's own symbols for the
+// same JavaScript — F4 item 1), plus diagnostics/coverage/the raw analysis
+// riding along under `okAnalysis`, and `regions` already projected down to
+// `{ name, kind, lineStart, lineEnd, doc }` outline pieces (F4 item 2) — never
+// the analyser's own region shape (`source`, `contentRange`/`valueRange`,
+// `role`, `format`/`language`) and never OKJS syntax itself.
 //
 // @kedem/okjs/tooling is a pure, non-executing static analyser: it never
 // fetches, imports component modules, executes component code or creates a
@@ -15,6 +20,15 @@
 const { registerExtension } = require('./extensions');
 
 const MATCH = /\.(ok\.js|ok\.mjs|ok\.html)$/i;
+
+// Bumped whenever THIS FILE changes what analyze() returns for the SAME
+// input — a new generic-symbol nesting pass (F4 item 1) or a different
+// region shape (F4 item 2) are both exactly that, and neither the installed
+// @kedem/okjs package's own version nor its SCHEMA_VERSION moved to say so.
+// Folded into the schema segment (not a third colon-separated field) so the
+// version string's shape — "pkgVersion:schema" — stays the same for anyone
+// already parsing it; see the workspace's analyzerVersion restale check.
+const EXTENSION_CONTRACT_VERSION = 2;
 
 let tooling = null;
 let toolingError = null;
@@ -37,7 +51,7 @@ function toolingVersion() {
     }
     const t = loadTooling();
     const schema = t && t.SCHEMA_VERSION != null ? t.SCHEMA_VERSION : '0';
-    return `${pkgVersion}:${schema}`;
+    return `${pkgVersion}:${schema}+ext${EXTENSION_CONTRACT_VERSION}`;
 }
 
 // A synthetic identifier, never a filesystem lookup — analyzeOKSource only
@@ -73,6 +87,136 @@ function translateSymbols(analysis) {
                 lineEnd: s.range.loc.end.line,
             }))
     );
+}
+
+// F4 item 1: a component file's ONLY symbol used to be the tag — `find('rows')`
+// could not reach a member without falling back to grep/FTS, because the okjs
+// extension outranks the generic extractor in parse.js#extract() instead of
+// adding to it. The fix runs BOTH: the okjs analyser for the component symbol
+// (above) and regions, and the plain acorn extractor (parse.js#extractJavaScript,
+// the same one every `.js` file gets) for the file's JavaScript, then nests
+// the latter's symbols under the component they fall inside (below).
+//
+// Required lazily, never at module load: parse.js requires ext-okjs.js (this
+// file) at ITS load time to register the extension, so requiring parse.js
+// back from here at OUR load time would see parse.js's module only
+// half-built (`module.exports` not yet assigned). By the time analyze()
+// actually runs, both modules have finished loading and this is safe.
+let parseMod = null;
+function requireParse() {
+    if (!parseMod) parseMod = require('./parse');
+    return parseMod;
+}
+
+// The `<script>` block's region for a `.ok.html` file — the only part of
+// the file that is JavaScript at all; `.ok.js`/`.ok.mjs` have no template or
+// style markup around the code, so the whole source already IS the script.
+function scriptRegionOf(analysis) {
+    return (analysis.regions || []).find((r) => r.role === 'script' && r.contentRange);
+}
+
+// 1-based line number of a byte offset, for remapping a `.ok.html` script
+// block's acorn line numbers (which start counting from the block's own
+// line 1) back into whole-file line numbers.
+function lineAt(source, offset) {
+    return source.slice(0, offset).split('\n').length;
+}
+
+function shiftSymbols(symbols, byteOffset, baseLine) {
+    if (!byteOffset) return symbols;
+    return symbols.map((s) => ({
+        ...s,
+        start: s.start + byteOffset,
+        end: s.end + byteOffset,
+        lineStart: s.lineStart + baseLine - 1,
+        lineEnd: s.lineEnd + baseLine - 1,
+    }));
+}
+
+// The generic extractor's symbols for this file's JavaScript. For
+// `.ok.js`/`.ok.mjs` that is `source` itself (one JS module); for
+// `.ok.html` it is only the `<script>` block's text, run on its own and
+// shifted back into whole-file byte/line coordinates — the okjs analyser's
+// OWN ranges are already whole-file coordinates (its `analyzeJavaScriptRegion`
+// takes the block's offset for exactly this reason), so this mirrors that
+// rather than inventing a second coordinate scheme.
+//
+// No `<script>` block found on a `.ok.html` file (or acorn cannot parse
+// what it finds — should not happen, since the okjs analyser already
+// parsed this same JavaScript, but a checker that throws must never take
+// the whole file down): falls back to tag-only, same as before this fix.
+function genericSymbolsFor(path, source, analysis) {
+    let jsSource = source;
+    let byteOffset = 0;
+    if (/\.ok\.html$/i.test(String(path || ''))) {
+        const region = scriptRegionOf(analysis);
+        if (!region) return [];
+        byteOffset = region.contentRange.start;
+        jsSource = source.slice(region.contentRange.start, region.contentRange.end);
+    }
+    try {
+        const { extractJavaScript } = requireParse();
+        const { symbols } = extractJavaScript(path, jsSource);
+        return shiftSymbols(symbols, byteOffset, lineAt(source, byteOffset));
+    } catch {
+        return [];
+    }
+}
+
+// Nests a generic symbol (and everything already nested under it, e.g.
+// `context.refresh` under `context`) under the component tag whose
+// definition range contains it, by byte-range containment — the acorn
+// extractor already worked out the inner nesting; this adds one more name
+// segment in front (`setting-group.context`, `setting-group.context.refresh`).
+// A top-level generic symbol OUTSIDE every component's range (a helper
+// function above the `export default`) is left exactly as acorn reported
+// it: "top-level module functions outside it stay top-level."
+function nestComponentMembers(componentSymbols, genericSymbols) {
+    if (!componentSymbols.length || !genericSymbols.length) return genericSymbols;
+    const claimed = new Set();
+    const nested = [];
+    for (const tag of componentSymbols) {
+        const roots = genericSymbols.filter(
+            (s) => !s.parent && !claimed.has(s) && s.start >= tag.start && s.end <= tag.end,
+        );
+        if (!roots.length) continue;
+        const rootPaths = roots.map((s) => s.path);
+        for (const s of genericSymbols) {
+            if (claimed.has(s)) continue;
+            if (!rootPaths.some((r) => s.path === r || s.path.startsWith(`${r}.`))) continue;
+            claimed.add(s);
+            nested.push({
+                ...s,
+                path: `${tag.name}.${s.path}`,
+                parent: s.parent ? `${tag.name}.${s.parent}` : tag.name,
+            });
+        }
+    }
+    const leftover = genericSymbols.filter((s) => !claimed.has(s));
+    return [...nested, ...leftover];
+}
+
+// F4 item 2: workspace.js used to know the okjs analyser's OWN region shape
+// (`source: 'definition'|'block'`, `contentRange`/`valueRange`, `role`,
+// `format`/`language`) — exactly the thing "everything OKJS-specific lives
+// HERE" (file header) promised it would never have to. This is that
+// projection, moved here: `{ name, kind, lineStart, lineEnd, doc }` only,
+// which is all carveRegions() (workspace.js) and the rest of the piecewise
+// outline ever needed. Only `definition`/`block` regions are outline
+// pieces — `source: 'script'` regions (one import statement) are
+// reference-sized, not a piece a caller reads or edits by itself.
+function normalizeRegions(analysis) {
+    return (analysis.regions || [])
+        .filter((r) => r.source === 'definition' || r.source === 'block')
+        .map((r) => ({ region: r, span: r.contentRange || r.valueRange || r.range }))
+        .filter(({ span }) => span && span.end > span.start)
+        .map(({ region, span }) => ({
+            name: region.role || region.kind,
+            kind: region.kind,
+            lineStart: span.loc.start.line,
+            lineEnd: Math.max(span.loc.start.line, span.loc.end.line),
+            doc: [region.role, region.format || region.language].filter(Boolean).join(' ') || null,
+        }));
 }
 
 // Dependency edges, straight from the analyser's own resolution — never a
@@ -127,8 +271,14 @@ function analyzeWith(t, { path, source, baseURL, importMap }) {
             baseURL: baseURL || baseURLFor(path),
             importMap,
         });
+        const componentSymbols = translateSymbols(analysis);
+        // F4 item 1: the component symbol ALONE, plus the generic extractor's
+        // symbols for the same file's JavaScript, nested under the component
+        // they fall inside of. Imports stay the analyser's own
+        // (translateImports, above) — acorn's import list is never merged in.
+        const generic = genericSymbolsFor(path, source, analysis);
         return {
-            symbols: translateSymbols(analysis),
+            symbols: [...componentSymbols, ...nestComponentMembers(componentSymbols, generic)],
             imports: translateImports(analysis),
             exports: [],
             // `parsed` means "the analyser could walk this source," same as
@@ -142,7 +292,9 @@ function analyzeWith(t, { path, source, baseURL, importMap }) {
             okAnalysis: analysis,
             diagnostics: analysis.diagnostics,
             coverage: analysis.coverage,
-            regions: analysis.regions,
+            // Normalized outline pieces (F4 item 2), not the analyser's own
+            // region shape — see normalizeRegions() above.
+            regions: normalizeRegions(analysis),
         };
     } catch (err) {
         // Fail soft, same contract parse.js#extract() already keeps for

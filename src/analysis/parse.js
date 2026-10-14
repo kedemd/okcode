@@ -17,6 +17,7 @@ const { extensionFor } = require('./extensions');
 // today. extract() below never mentions OKJS by name; it only ever asks the
 // generic registry whether SOMETHING claims this path.
 require('./ext-okjs');
+const treesitter = require('./treesitter');
 
 const JS = new Set(['.js', '.mjs', '.cjs', '.jsx']);
 
@@ -61,6 +62,11 @@ function extOf(path) {
 const LANGS = {
     '.ts': 'typescript',
     '.tsx': 'typescript',
+    '.mts': 'typescript',
+    '.cts': 'typescript',
+    '.py': 'python',
+    '.go': 'go',
+    '.rs': 'rust',
     '.json': 'json',
     '.jsonc': 'json',
     '.md': 'markdown',
@@ -607,5 +613,21 @@ function extractJavaScript(path, src) {
 }
 
 registerExtractor('javascript', extractJavaScript);
+
+// TypeScript, Python, Go, Rust: one generic tree-sitter extractor, data per
+// language (see treesitter.js and docs/WORKPLAN.md Phase F) — no AST-walking
+// code added here. `extractFor` returns null when the grammar is not loaded
+// for this process (optional runtime absent, or workspace.js never called
+// treesitter.preload() for this language); that throw is caught by extract()
+// above and reproduces EXACTLY the "no extractor" message the generic path
+// gives a language with nothing registered at all — grammars missing must
+// look identical to grammars never having been written.
+for (const id of ['typescript', 'python', 'go', 'rust']) {
+    registerExtractor(id, (p, src) => {
+        const result = treesitter.extractFor(id, p, src);
+        if (!result) throw new Error(`${id} — searchable, no symbol extractor yet`);
+        return result;
+    });
+}
 
 module.exports = { extract, langOf, extOf, isTextual, isSecret, registerExtractor, TEXT_MAX, parseSource };

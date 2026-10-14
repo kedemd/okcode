@@ -25,6 +25,7 @@ const { spawnSync, spawn } = require('child_process');
 const acorn = require('acorn');
 const { langOf } = require('./parse');
 const { extensionFor } = require('./extensions');
+const treesitter = require('./treesitter');
 const templateBalance = require('./template-balance');
 const { colorLiterals } = require('./convention-color');
 const { lineColAt, offsetAtLineCol } = require('./text');
@@ -178,7 +179,8 @@ function parseNodeCheckOutput(stderr) {
 function validateSource({ rel, text, moduleKind = 'ambiguous', palette = [] }) {
     const isJS = langOf(rel) === 'javascript';
     const ext = extensionFor(rel);
-    if (!isJS && !ext) {
+    const tsLang = treesitter.langIdForPath(rel);
+    if (!isJS && !ext && !tsLang) {
         return {
             validators: [{ validator: 'none', status: 'skipped', covers: [] }],
             diagnostics: [],
@@ -291,6 +293,22 @@ function validateSource({ rel, text, moduleKind = 'ambiguous', palette = [] }) {
     // diagnostic the analyser reports already carries its own offsets and its
     // own namespaced `source` (okjs.definition, okjs.imports, …), so it is
     // taken through unmodified rather than collapsed into one generic label.
+    // The tree-sitter syntax gate (F2): ERROR/MISSING nodes from the SAME
+    // generic extractor F1 uses, for every tree-sitter language alike. Only
+    // produces diagnostics when that language's grammar is ALREADY loaded in
+    // this process (treesitter.preload(), run by workspace.js's scan) —
+    // absent the optional runtime or a grammar, this is [] and the file is
+    // validated exactly as it is today: not at all, by this gate.
+    if (tsLang) {
+        const found = treesitter.syntaxDiagnostics(rel, text);
+        validators.push({
+            validator: 'treesitter-syntax',
+            status: found.length ? 'failed' : 'passed',
+            covers: fullSpan,
+        });
+        diagnostics.push(...found);
+    }
+
     if (ext) {
         try {
             const result = ext.analyze({ path: rel, source: text });
@@ -357,7 +375,8 @@ function validateSource({ rel, text, moduleKind = 'ambiguous', palette = [] }) {
 async function validateSourceAsync({ rel, text, moduleKind = 'ambiguous', palette = [] }) {
     const isJS = langOf(rel) === 'javascript';
     const ext = extensionFor(rel);
-    if (!isJS && !ext) {
+    const tsLang = treesitter.langIdForPath(rel);
+    if (!isJS && !ext && !tsLang) {
         return {
             validators: [{ validator: 'none', status: 'skipped', covers: [] }],
             diagnostics: [],
@@ -447,6 +466,22 @@ async function validateSourceAsync({ rel, text, moduleKind = 'ambiguous', palett
                 note: String(err.message).slice(0, 120),
             });
         }
+    }
+
+    // The tree-sitter syntax gate (F2): ERROR/MISSING nodes from the SAME
+    // generic extractor F1 uses, for every tree-sitter language alike. Only
+    // produces diagnostics when that language's grammar is ALREADY loaded in
+    // this process (treesitter.preload(), run by workspace.js's scan) —
+    // absent the optional runtime or a grammar, this is [] and the file is
+    // validated exactly as it is today: not at all, by this gate.
+    if (tsLang) {
+        const found = treesitter.syntaxDiagnostics(rel, text);
+        validators.push({
+            validator: 'treesitter-syntax',
+            status: found.length ? 'failed' : 'passed',
+            covers: fullSpan,
+        });
+        diagnostics.push(...found);
     }
 
     if (ext) {

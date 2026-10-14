@@ -30,8 +30,13 @@ OLLAMA_MODEL="${OLLAMA_MODEL:-qwen3-embedding:latest}"
 ADCODE="${ADCODE:-}"
 REPO_NAME="$(basename "$REPO")"
 
-rm -rf "$SCRATCH"
 mkdir -p "$SCRATCH"
+# Wipe only the configs about to run, not the whole scratch dir — a
+# `--configs` subset (e.g. re-running just E after fixing a bug) must not
+# destroy sibling configs' already-measured output sitting next to it.
+for c in A B C D E; do
+    [[ "$CONFIGS" == *"$c"* ]] && rm -rf "$SCRATCH/$c"
+done
 
 # A fresh copy of the repo's TRACKED files (git ls-files) — never the
 # original, never node_modules/.git, and a new copy per configuration so one

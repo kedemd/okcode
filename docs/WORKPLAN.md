@@ -36,6 +36,34 @@ The brain moves onto okcode only AFTER both are published (the brain's own seque
 3. **okcode**: depend on `@kedem/okdb ^2.3.0` from npm (drop `file:../okdb-src`) — done: okdb 2.3.0 is published, and okcode's suite + e2e (Ollama) pass per file against it, the free-tier-bound tests skipping (DESIGN §11) → decide `private`/`license` → version `0.1.0` → **owner go-ahead** → `npm publish --access public`.
 4. **brain**: adapter at `/data/okcode` (worker with roles, main passive), delete `src/codeindex/` and its `code` env data; delete `src/vector-views.js` + `snapshotEveryChanges` overrides if okdb 2.3 makes them unnecessary.
 
+## Phase F — languages and resolved edges
+
+Why: symbols exist for JavaScript only (`registerExtractor('javascript', …)` is the one registrant; `.ts`, `.py`, `.go`, `.rs`, … are "searchable, no symbol extractor yet"), and `refs()` is a substring scan (`confidence: 'textual'`). Prior art reviewed: adcode (`~/forgejo/adcode`, Python + tree-sitter + SQLite). Taken from it: only the per-language extraction model and resolved import/call edges. Not taken: its storage, freshness, CLI or symbol-id format (okcode's are stronger on each).
+
+**Approach: one generic tree-sitter extractor, data per language — no per-language code.**
+
+- `web-tree-sitter` (WASM): no native build, runs wherever Node runs. One generic extractor runs a grammar's **`tags.scm`** query (the upstream query GitHub code navigation uses; most grammars ship one) and maps captures to the existing symbol shape: `@definition.{function,method,class,interface,module,constant,…}` + `@name` → `{ name, kind, lineStart, lineEnd, start, end }`; `parent`/`path` (`Class.method`) from range containment; `doc` from `@doc` where the query captures it, else the comment block directly above. `@reference.call` / `@reference.class` → reference sites (F3).
+- A language = `{ id, exts, wasm, tags.scm, imports.scm? }`. Adding Go or Rust is a data entry plus fixtures. No AST-walking code is written per language, so the maintenance is upstream's queries. A local `tags.scm` override exists only where upstream's misses something we test for.
+- **Packaging:** grammars are optional and lazy. The core keeps acorn and no WASM. Grammars ship in an optional package (like `@kedem/okjs` today). It is built by a script that pins each grammar's version, its `.wasm` and its `tags.scm` (0.5–3 MB per grammar, loaded only when a file of that language is seen). Absent grammar → today's behaviour ("searchable, no symbol extractor").
+- **Edit safety for free:** a tree-sitter parse marks syntax errors (`ERROR`/`MISSING` nodes). They become a `syntax` diagnostic in `validate`, and the existing baseline-vs-candidate rule refuses only new ones. So every supported language gets the same guarded edits JS has, with no toolchain on the target.
+- JavaScript stays on acorn: it is richer (exports, `module.exports`, `node --check`) and already tested. TypeScript moves to tree-sitter.
+
+| work                     | deliverable |
+| ------------------------ | ----------- |
+| **F0 spike**             | `web-tree-sitter` current version + TS, Python, Go, Rust grammars: ABI compatibility (grammar `.wasm` must match the runtime's ABI; prebuilt bundles such as `tree-sitter-wasms` may lag), load time, memory per grammar, parse speed on a large repo vs acorn. Go/no-go before F1. |
+| **F1 generic extractor** | `src/analysis/treesitter.js`: lazy grammar loading, `tags.scm` → symbols, containment → `path`, doc capture; registered per language via `registerExtractor`; `analyzerVersion` includes grammar + query version, so a grammar upgrade reparses. First set: TypeScript/TSX, Python, Go, Rust. Next by demand: Java, C#, C/C++, Ruby, PHP, Kotlin, Swift. Fixtures per language (adcode's `tests/fixtures` show the shapes worth covering: decorators, nested classes, methods, docstrings, re-exports). |
+| **F2 syntax gate**       | `validate`: tree-sitter `ERROR`/`MISSING` → diagnostics for every tree-sitter language; existing `compareDiagnostics` unchanged. |
+| **F3 resolved edges**    | Imports resolved to a file (and symbol when named): relative specifiers, TS `tsconfig.json` `compilerOptions.paths` (JSONC; adcode's string-aware comment stripper is the reference), Python source roots (top-level `__init__.py` / `pyproject.toml` / `setup.py`, plus `src/`), re-exports as their own kind so barrels are followed; Go/Rust module paths after. `refs()` keeps the text scan as its universe but **ranks and labels** each hit: `local` (defined in the file), `imported` (name arrives through a resolved import), `textual`; call sites (`@reference.call`) marked `call`. New `importers(file)` (reverse imports). No new store types unless measured necessary: edges derive from the stored per-file `imports` + symbols. |
+| **F4 okjs**              | member symbols, normalized regions, component-tag refs (below). |
+
+**okjs follow-ups (F4).** The okjs extension's shape is right: optional peer, fail-soft fallback to acorn, analyser-sourced dependencies, regions for piecewise outline/edit, and the template-balance gate born from a measured failure. Three gaps:
+
+1. **One symbol per component.** With okjs installed, a `.ok.js` file's only symbol is the tag (`setting-group.ok.js`, 88 lines, 22 named members → 1 symbol). The extension outranks acorn instead of adding to it, so `find('rows')` can only reach a component member by grep/FTS. Fix: run the generic extractor too and nest its symbols under the component (`setting-group.rows`); the extension contributes the tag + regions on top.
+2. **The okjs region shape leaks into the workspace.** `workspace.js` knows `source: 'definition'|'block'`, `contentRange`/`valueRange`, `role` and `okAnalysis`, despite `ext-okjs.js` promising "everything OKJS-specific lives here". Fix: extensions return normalized regions (`{ name, kind, lineStart, lineEnd, doc }`) and an opaque `analysis`; carving stays generic.
+3. **Component usage.** The analyser's `component-tag` dependencies make "who uses `<setting-group>`" a resolved ref (F3), not a grep for the tag string.
+
+Also check `.ok` → `html` in `LANGS`: okjs's docs only use `.ok.js` / `.ok.html`.
+
 ## Rules for every owner
 
 - Node ≥ 20, CommonJS, `node:test` + `node:assert/strict`, no new dependencies without the manager.
@@ -48,6 +76,7 @@ The brain moves onto okcode only AFTER both are published (the brain's own seque
 
 - A named function assigned to `module.exports` (`module.exports = function createX(…)`) is found as `module.exports`, not by its name.
 - Methods of an anonymous `export default { … }` object are not extracted as symbols (the file exports `default` only).
+- Symbols for JavaScript only; `refs()` is textual; component members of `.ok.js` files are not symbols — Phase F.
 - Licensing is done (okdb `db.licenses` + `OKDB_LICENSE_FILE`; okcode `open({ path, license })`, `status().license`, CLI `--license`) — DESIGN §5. okcode has no activate call of its own: a node-bound license is activated with `oc.db.licenses.activate(token)` on the live store, or by reopening with `{ blob, activation }`.
 
 ## Status

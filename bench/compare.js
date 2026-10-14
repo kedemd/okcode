@@ -85,10 +85,16 @@ async function cold(a) {
 }
 
 async function warm(a) {
+    // Must match the `cold` run's own fts mode: addWorkspace()'s fts
+    // defaults to 'full' when not given, so a warm reopen of a 'symbols'
+    // workspace that omits it would silently CONVERGE it back to 'full' —
+    // building the whole content index on what was supposed to be a cheap
+    // reopen, not just measuring it wrong.
+    const fts = a.fts === 'symbols' ? 'symbols' : 'full';
     const db = await openStore(a.store);
     const oc = await okcode.open({ db });
     const t0 = Date.now();
-    await oc.addWorkspace('bench', { access: localFs(a.repo) });
+    await oc.addWorkspace('bench', { access: localFs(a.repo), fts });
     const warmMs = Date.now() - t0;
     await oc.close();
     await db.close();

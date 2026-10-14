@@ -89,7 +89,7 @@ bench_okcode() {
 
     local warmTime="$SCRATCH/$cfg/warm.time"
     local warmOut="$SCRATCH/$cfg/warm.json"
-    run_timed "$warmTime" node "$COMPARE_JS" warm --repo "$copy" --store "$store" >"$warmOut" 2>"$SCRATCH/$cfg/warm.log"
+    run_timed "$warmTime" node "$COMPARE_JS" warm --repo "$copy" --store "$store" --fts "$fts" >"$warmOut" 2>"$SCRATCH/$cfg/warm.log"
     local warmRssKb warmWall
     read -r warmRssKb warmWall < "$warmTime"
 

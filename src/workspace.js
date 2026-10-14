@@ -25,6 +25,7 @@ const crypto = require('crypto');
 const pathPosix = require('path').posix;
 const { extract, langOf, isTextual, isSecret } = require('./analysis/parse');
 const { extensionFor } = require('./analysis/extensions');
+const treesitter = require('./analysis/treesitter');
 const { scanPackages, readPackages } = require('./analysis/packages');
 const { validateSourceAsync, compareDiagnostics } = require('./analysis/validate');
 const { paletteFrom } = require('./analysis/convention-color');
@@ -423,6 +424,7 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
     async function ensureTexts(list) {
         const need = list.filter((f) => f && typeof f.content !== 'string' && f.indexed !== false && !isSecret(f.path));
         if (!need.length) return;
+        await treesitter.preload(need.map((f) => f.path));
         const got = await readMany(
             need.map((f) => f.path),
             (p) => (files.get(p) || {}).size,
@@ -511,6 +513,9 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
                 continue;
             }
             (textual ? needRead : needHash).push({ p, now });
+        }
+        if (needHash.length || needRead.length) {
+            await treesitter.preload([...needHash, ...needRead].map((x) => x.p));
         }
         if (needHash.length) {
             let hashed;
@@ -735,9 +740,12 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
             // extension-analysed file; a mismatch against the extension's
             // current version forces the same re-ingest a hash change would.
             const ext = extensionFor(row.path);
+            const tsVersion = treesitter.currentVersionFor(row.path);
             const restale =
                 unchanged &&
-                (wantsText !== (prior.indexed !== false) || (ext && prior.analyzerVersion !== ext.version));
+                (wantsText !== (prior.indexed !== false) ||
+                    (ext && prior.analyzerVersion !== ext.version) ||
+                    (tsVersion && prior.analyzerVersion !== tsVersion));
             if (unchanged && !restale) {
                 prior.size = h.size;
                 prior.mtime = h.mtime;
@@ -754,11 +762,22 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
         for (const { row, prior } of untouched) {
             const wantsText = isTextual(row.path, row.size);
             const ext = extensionFor(row.path);
-            const restale = wantsText !== (prior.indexed !== false) || (ext && prior.analyzerVersion !== ext.version);
+            const tsVersion = treesitter.currentVersionFor(row.path);
+            const restale =
+                wantsText !== (prior.indexed !== false) ||
+                (ext && prior.analyzerVersion !== ext.version) ||
+                (tsVersion && prior.analyzerVersion !== tsVersion);
             if (!restale) continue;
             if (wantsText) toRead.push(row);
             else opaque.push({ ...row, hash: prior.hash });
         }
+        // Tree-sitter grammars load ASYNCHRONOUSLY (WASM compilation); extract()
+        // itself is a plain synchronous call from every ingestOne() site, so
+        // the one await happens HERE, once per scan, for every language about
+        // to be ingested — by the time ingestOne() below reaches a .ts/.py/.go/
+        // .rs file, its grammar (if any) is already resident. See treesitter.js's
+        // module comment for why this seam and not an async extract().
+        await treesitter.preload([...opaque, ...toRead].map((r) => r.path));
         // Only textual files are READ; the rest are recorded from the scan row
         // alone. That keeps a workspace's images, archives and bundles present
         // in the graph (they have a path, a size and a hash) without dragging
@@ -2170,6 +2189,7 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
                 liteAfter = null;
             }
             const ok = liteAfter && !liteAfter.missing;
+            await treesitter.preload([rel]);
             ingestOne(
                 { path: rel, size: ok ? liteAfter.size : readback.length, mtime: ok ? liteAfter.mtime : null },
                 readback,

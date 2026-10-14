@@ -1,0 +1,18 @@
+{
+    "typescript": {
+        "package": "tree-sitter-typescript",
+        "version": "0.23.2"
+    },
+    "python": {
+        "package": "tree-sitter-python",
+        "version": "0.25.0"
+    },
+    "go": {
+        "package": "tree-sitter-go",
+        "version": "0.25.0"
+    },
+    "rust": {
+        "package": "tree-sitter-rust",
+        "version": "0.24.0"
+    }
+}

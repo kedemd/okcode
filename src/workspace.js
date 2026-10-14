@@ -60,6 +60,13 @@ const DEFAULTS = {
     // payload.
     readBatchFiles: 200,
     readBatchBytes: 8 * 1024 * 1024,
+    // The in-memory text cache (DESIGN §5) is bounded, not unlimited: a cold
+    // index of a large repo must not hold every file's decoded text alive at
+    // once just because nothing has evicted it yet. LRU by recency of the
+    // last cache/touch; evicted entries are not lost — verify()/ensureTexts()
+    // already treat "no content cached" as "go read it", the same path a
+    // fresh process takes on reopen, so eviction only ever costs a re-read.
+    textCacheMaxBytes: 24 * 1024 * 1024,
     // Persist ingests from verify-on-read and own writes in the background
     // (one transaction per burst). `false` = only on flush()/sync().
     autoFlush: true,
@@ -367,6 +374,49 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
     // (stats().skipped, structure().skipped) until a later walk takes it in.
     const scanWarnings = new Map();
 
+    // Bounded text cache (DESIGN §5: "a cache ... rebuilt from the facade,
+    // never persisted"). `contentLru` tracks only rels whose record currently
+    // holds `.content`, in LEAST-recently-touched order (re-inserting a key
+    // moves it to the end — Map preserves insertion order). `cachedBytes` is
+    // the running total so eviction never has to walk `files` to measure
+    // itself. Touched on every content assignment (ingestOne, ensureTexts,
+    // verify) and on `drop()`; nothing else needs to know this cache exists.
+    const contentLru = new Map(); // rel -> byte length
+    let cachedBytes = 0;
+    function cacheContent(record, text) {
+        const rel = record.path;
+        const had = contentLru.get(rel);
+        if (had !== undefined) cachedBytes -= had;
+        record.content = text;
+        const bytes = Buffer.byteLength(text, 'utf8');
+        contentLru.delete(rel); // re-insert for LRU order even if already present
+        contentLru.set(rel, bytes);
+        cachedBytes += bytes;
+        evictContentOverBudget(rel);
+    }
+    function forgetContent(rel) {
+        const had = contentLru.get(rel);
+        if (had === undefined) return;
+        contentLru.delete(rel);
+        cachedBytes -= had;
+    }
+    // Evict the LEAST recently touched entries until back under budget,
+    // never the one just written (`keep`) — a batch that reads and writes
+    // its own 200 files one at a time must not evict file #1's text before
+    // file #200 of the SAME batch still needs the cache for anything that
+    // reads through it (the content/prepared resolvers, grep's ready path).
+    function evictContentOverBudget(keep) {
+        if (cachedBytes <= opts.textCacheMaxBytes) return;
+        for (const [rel, bytes] of contentLru) {
+            if (cachedBytes <= opts.textCacheMaxBytes) break;
+            if (rel === keep) continue;
+            const rec = files.get(rel);
+            if (rec) rec.content = undefined;
+            contentLru.delete(rel);
+            cachedBytes -= bytes;
+        }
+    }
+
     // F3's resolved edges — a specifier -> workspace file (and named symbol,
     // when the import names one), cached and keyed by `generation` (bumped
     // on every ingest/drop above), so a cold refs()/importers() call after
@@ -401,9 +451,10 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
             lossless,
         };
         // Symbols and diagnostics describe the text; the text itself is kept
-        // as a cache so slicing, quoting and the next verify need no read.
-        if (text !== null && parsed.indexed !== false) record.content = text;
+        // as a cache (bounded, see cacheContent above) so slicing, quoting
+        // and the next verify need no read.
         files.set(row.path, record);
+        if (text !== null && parsed.indexed !== false) cacheContent(record, text);
         generation++;
         if (store) pending.set(row.path, 'save');
         return record;
@@ -411,6 +462,7 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
 
     function drop(rel) {
         if (!files.has(rel)) return false;
+        forgetContent(rel);
         files.delete(rel);
         generation++;
         if (store) pending.set(rel, 'remove');
@@ -482,7 +534,7 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
             const cur = files.get(f.path);
             if (cur && cur.hash === h) {
                 const d = textUtil.decode(buf);
-                cur.content = d.text;
+                cacheContent(cur, d.text);
                 cur.lossless = d.lossless;
             } else {
                 // mtime unknown for these bytes: null makes the next verify
@@ -608,7 +660,7 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
                 const h = sha1(buf);
                 if (prior && prior.hash === h && prior.indexed !== false) {
                     const d = textUtil.decode(buf);
-                    prior.content = d.text;
+                    cacheContent(prior, d.text);
                     prior.lossless = d.lossless;
                     prior.size = now.size;
                     prior.mtime = now.mtime;

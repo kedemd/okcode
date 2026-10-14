@@ -82,7 +82,7 @@ const LANGUAGES = {
         // were EMPTY for every TS/TSX file) and added top-level const/let/var
         // symbols (manifestVersion() below folds that package's own version
         // in too, so bumping IT also forces a reparse).
-        queryVersion: 5,
+        queryVersion: 6,
         importQueryVersion: 1,
         comment: { line: '//', blockOpen: '/*', blockClose: '*/' },
         // `export` wraps the declaration one level up (`export class C {}`
@@ -91,8 +91,12 @@ const LANGUAGES = {
         // `variable_declarator`, one level under the `lexical_declaration`
         // that `export_statement` wraps instead.
         isExported(defNode) {
-            return hasAncestorType(defNode, 'export_statement', 2);
+            return defNode.type === 'export_statement' || hasAncestorType(defNode, 'export_statement', 2);
         },
+        // A binding's symbol is its whole statement, as in parse.js's JS
+        // extractor: `read('x#Card')` shows `export const Card = …`, not
+        // `Card = …`. Same for `export class`/`export function`.
+        widenSpan: { parentTypes: ['lexical_declaration', 'variable_declaration', 'export_statement'], soleOnly: true },
         // A class's own `@decorator`(s) are already children of
         // `class_declaration` (the grammar parses them INTO the class
         // node), so its span is already right without this; a method's or
@@ -762,9 +766,18 @@ function decoratedSpan(node, dec) {
 // the PARENT's. Applied once, before decoratedSpan, so a templated C++
 // function still composes correctly with `decorators.wrapperTypes` above
 // (checked against the now-widened node's own parent).
+// Climbs while the parent is one of `parentTypes` (C's declarator →
+// definition is one step; TypeScript's declarator → `const …;` → `export …`
+// is two). `soleOnly`: climb only when this node is its parent's only child
+// of its type — `const a = 1, b = 2` must keep two spans, not one each.
 function widenToParent(node, widen) {
-    if (widen && node.parent && widen.parentTypes.includes(node.parent.type)) return node.parent;
-    return node;
+    if (!widen) return node;
+    let at = node;
+    while (at.parent && widen.parentTypes.includes(at.parent.type)) {
+        if (widen.soleOnly && at.parent.namedChildren.filter((c) => c.type === at.type).length > 1) break;
+        at = at.parent;
+    }
+    return at;
 }
 
 // tree-sitter marks a syntax error as either an ERROR node (unexpected
@@ -869,6 +882,23 @@ function buildSymbols(id, cfg, src, tree, query) {
             node,
         };
     });
+    // Widening can land two captures of one definition on the same span
+    // (TypeScript's layered JS query captures `const f = () => …` as the
+    // statement, the local one as the declarator): one symbol, best kind.
+    const seen = new Map();
+    for (let i = defs.length - 1; i >= 0; i--) {
+        const d = defs[i];
+        const key = `${d.start}:${d.end}:${d.name}`;
+        const other = seen.get(key);
+        if (!other) {
+            seen.set(key, d);
+            continue;
+        }
+        if (kindRank(d.kind) < kindRank(other.kind)) other.kind = d.kind;
+        if (!other.doc && d.doc) other.doc = d.doc;
+        if (!other.explicitParent && d.explicitParent) other.explicitParent = d.explicitParent;
+        defs.splice(i, 1);
+    }
 
     // Nesting: an explicit @parent capture (Go's receiver, Rust's impl type)
     // wins outright. Otherwise the smallest OTHER definition whose range
@@ -942,10 +972,27 @@ function buildSymbols(id, cfg, src, tree, query) {
     return { symbols, references: resolvedRefs };
 }
 
+// Counting newlines from the top on every call made extraction quadratic: a
+// real 1,000-line component has hundreds of call sites, each asking for its
+// line. One line-start index per source (the last one, which is the file
+// being extracted) and a binary search instead; same answers.
+let lineIndexSrc = null;
+let lineStarts = null;
 function lineOf(src, offset) {
-    let line = 1;
-    for (let i = 0; i < offset && i < src.length; i++) if (src[i] === '\n') line++;
-    return line;
+    if (src !== lineIndexSrc) {
+        lineStarts = [0];
+        for (let i = 0; i < src.length; i++) if (src.charCodeAt(i) === 10) lineStarts.push(i + 1);
+        lineIndexSrc = src;
+    }
+    const at = Math.min(offset, src.length);
+    let lo = 0;
+    let hi = lineStarts.length - 1;
+    while (lo < hi) {
+        const mid = (lo + hi + 1) >> 1;
+        if (lineStarts[mid] <= at) lo = mid;
+        else hi = mid - 1;
+    }
+    return lo + 1;
 }
 
 // F3's import/export edges, from grammars/<lang>/imports.scm — ONE generic

@@ -476,7 +476,7 @@ test('signature: the full definition up to its BODY, not just the first line —
     // `export` wraps the declaration one level up (see the typescript entry
     // in treesitter.js's LANGUAGES table) — the signature, like the
     // definition's span, starts at the function itself.
-    assert.equal(tsSym.signature, 'async function createUser(name: string, age: number): Promise<User>');
+    assert.equal(tsSym.signature, 'export async function createUser(name: string, age: number): Promise<User>');
 
     const py = ['def create_user(', '    name,', '    age,', '):', '    return {name: name, age: age}', ''].join('\n');
     const pySym = extract('multi.py', py).symbols.find((s) => s.name === 'create_user');
@@ -510,7 +510,7 @@ test('signature: capped at a sane length, with an explicit … when cut — neve
     const sym = extract('capped.ts', ts).symbols.find((s) => s.name === 'manyParams');
     assert.ok(sym.signature.length <= 301, sym.signature.length);
     assert.ok(sym.signature.endsWith('…'), sym.signature);
-    assert.ok(sym.signature.startsWith('function manyParams(paramNumber0'), sym.signature);
+    assert.ok(sym.signature.startsWith('export function manyParams(paramNumber0'), sym.signature);
 });
 
 test('a broken file in each language: parsed structure still empty, no crash', () => {

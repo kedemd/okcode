@@ -65,10 +65,10 @@
 ; another leading qualifier on the same `declaration` node, so no separate
 ; pattern is needed for it) — see grammars/c/tags.local.scm's identical
 ; pair for the two declarator shapes and the known pointer/array gap.
-; Restricted to a DIRECT child of `translation_unit`: a namespace's own
-; globals (`namespace ns { int y = 1; }`) are one level deeper still and
-; are not matched here, the same conservative, file-root-only scope
-; Rust's crate-root `const`/`static` override above draws.
+; A DIRECT child of `translation_unit`, or of a namespace's body: a
+; namespace member (`namespace ns { constexpr int kMax = 3; }`) is as
+; global as a file-scope one, just qualified (`ns.kMax`). A function's or a
+; class's own declarations are neither, so they stay out.
 (translation_unit
   (declaration
     declarator: (identifier) @name) @definition.constant)
@@ -77,3 +77,39 @@
   (declaration
     declarator: (init_declarator
       declarator: (identifier) @name)) @definition.constant)
+
+(namespace_definition
+  body: (declaration_list
+    (declaration
+      declarator: (identifier) @name) @definition.constant))
+
+(namespace_definition
+  body: (declaration_list
+    (declaration
+      declarator: (init_declarator
+        declarator: (identifier) @name)) @definition.constant))
+
+; A pointer global (`const char *name = "x";`): the name sits one
+; declarator deeper.
+(translation_unit
+  (declaration
+    declarator: (init_declarator
+      declarator: (pointer_declarator
+        declarator: (identifier) @name))) @definition.constant)
+
+(namespace_definition body: (declaration_list
+  (declaration
+    declarator: (init_declarator
+      declarator: (pointer_declarator
+        declarator: (identifier) @name))) @definition.constant))
+
+(translation_unit
+  (declaration
+    declarator: (pointer_declarator
+      declarator: (identifier) @name)) @definition.constant)
+
+(namespace_definition body: (declaration_list
+  (declaration
+    declarator: (pointer_declarator
+      declarator: (identifier) @name)) @definition.constant))
+

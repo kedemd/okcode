@@ -148,7 +148,7 @@ const LANGUAGES = {
         // full-signature fix — see the typescript entry above. Bumped again
         // (real-repo fix, DESIGN §12): crate-root `const`/`static` now
         // produce symbols — upstream had no pattern for either.
-        queryVersion: 5,
+        queryVersion: 6,
         importQueryVersion: 1,
         comment: { line: '//' },
         isExported(defNode) {
@@ -279,7 +279,7 @@ const LANGUAGES = {
         // Bumped (real-repo fix, DESIGN §12): added `@reference.call` for
         // a plain call and a struct-member call — upstream had neither —
         // and a file-scope global variable now produces a symbol.
-        queryVersion: 3,
+        queryVersion: 5,
         importQueryVersion: 1,
         comment: { line: '//', blockOpen: '/*', blockClose: '*/' },
         // Unlike every other language here, this grammar's own
@@ -317,7 +317,7 @@ const LANGUAGES = {
         // a plain call, a member call and a namespace-qualified call —
         // upstream had none of the three — and a file-scope global
         // variable (incl. `constexpr`) now produces a symbol.
-        queryVersion: 3,
+        queryVersion: 6,
         importQueryVersion: 1,
         comment: { line: '//', blockOpen: '/*', blockClose: '*/' },
         // Same declarator/definition split as C above — see that entry's

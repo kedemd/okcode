@@ -706,3 +706,15 @@ test('top-level const/var becomes a symbol — Go (incl. a grouped const block),
     assert.ok(!csNames.has('x'), 'a plain field stays unindexed');
     assert.ok(!csNames.has('Y'), 'static readonly is not the `const` keyword this override targets');
 });
+
+test('globals inside a namespace / inline mod, and pointer globals, are symbols; locals are not', () => {
+    const cpp = extract('a.cpp', 'namespace app {\nconstexpr int kMax = 3;\nconst char* name = "x";\nvoid f() { int local = 1; }\n}\nint *p;\n');
+    assert.deepEqual(
+        cpp.symbols.filter((s) => s.kind === 'constant').map((s) => s.path).sort(),
+        ['app.kMax', 'app.name', 'p'],
+    );
+    const c = extract('a.c', 'static const char *top = "y";\nint *p;\nvoid f(void) { char *local = 0; }\n');
+    assert.deepEqual(c.symbols.filter((s) => s.kind === 'constant').map((s) => s.path).sort(), ['p', 'top']);
+    const rs = extract('a.rs', 'mod cfg {\n    pub const MAX: usize = 3;\n    static NAME: &str = "x";\n    fn f() { const LOCAL: u8 = 2; }\n}\n');
+    assert.deepEqual(rs.symbols.filter((s) => s.kind === 'constant').map((s) => s.path).sort(), ['cfg.MAX', 'cfg.NAME']);
+});

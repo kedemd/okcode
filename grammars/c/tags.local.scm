@@ -56,3 +56,17 @@
   (declaration
     declarator: (init_declarator
       declarator: (identifier) @name)) @definition.constant)
+
+; A pointer global (`const char *name = "x";`): the name sits one
+; declarator deeper.
+(translation_unit
+  (declaration
+    declarator: (init_declarator
+      declarator: (pointer_declarator
+        declarator: (identifier) @name))) @definition.constant)
+
+(translation_unit
+  (declaration
+    declarator: (pointer_declarator
+      declarator: (identifier) @name)) @definition.constant)
+

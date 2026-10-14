@@ -64,6 +64,7 @@ const LANGUAGES = {
         wasm: 'tree-sitter-typescript.wasm',
         tsxWasm: 'tree-sitter-tsx.wasm',
         queryVersion: 1,
+        importQueryVersion: 1,
         comment: { line: '//', blockOpen: '/*', blockClose: '*/' },
         // `export` wraps the declaration one level up (`export class C {}`
         // parses as `export_statement > class_declaration`); the arrow/
@@ -78,6 +79,7 @@ const LANGUAGES = {
         exts: ['.py'],
         wasm: 'tree-sitter-python.wasm',
         queryVersion: 1,
+        importQueryVersion: 1,
         comment: { line: '#' },
         // PEP 8 convention, not syntax: a single leading underscore means
         // "not part of the public API". Only a MODULE-level name is a
@@ -92,6 +94,7 @@ const LANGUAGES = {
         exts: ['.go'],
         wasm: 'tree-sitter-go.wasm',
         queryVersion: 1,
+        importQueryVersion: 1,
         comment: { line: '//' },
         // Go's own export rule IS syntax: capitalised identifiers are
         // package-exported, nothing else marks it.
@@ -103,6 +106,7 @@ const LANGUAGES = {
         exts: ['.rs'],
         wasm: 'tree-sitter-rust.wasm',
         queryVersion: 1,
+        importQueryVersion: 1,
         comment: { line: '//' },
         isExported(defNode) {
             // `pub`/`pub(crate)`/… is a direct child of the item node
@@ -206,6 +210,18 @@ function queryTextFor(id) {
     return `${upstream}\n${local}`;
 }
 
+// F3's import/export query, per language (grammars/<lang>/imports.scm) —
+// entirely optional: a language with no file here just gets `imports: []`,
+// same "degrade, never error" contract every other missing piece in this
+// module already keeps.
+function importQueryTextFor(id) {
+    try {
+        return fs.readFileSync(path.join(GRAMMAR_ROOT, id, 'imports.scm'), 'utf8');
+    } catch {
+        return null;
+    }
+}
+
 // Load (once) and cache the parser+query for one language id. Resolves to
 // null — never rejects — when the runtime, the vendored wasm or the query
 // fails for any reason: a broken grammar must degrade exactly like an
@@ -226,9 +242,18 @@ async function ensureLanguage(id) {
             parser.setLanguage(language);
             const queryText = queryTextFor(id);
             const query = new wts.Query(language, queryText);
-            const version = `${(man && man.version) || '0'}:q${cfg.queryVersion}`;
+            // The imports query is optional per language (importQueryTextFor
+            // returns null when grammars/<lang>/imports.scm does not exist)
+            // and its OWN version bump (bump cfg.importQueryVersion, not
+            // cfg.queryVersion, to avoid forcing a reparse of every file
+            // when only the import side changed) folds into analyzerVersion
+            // the same way the tags query's does.
+            const importQueryText = importQueryTextFor(id);
+            const importQuery = importQueryText ? new wts.Query(language, importQueryText) : null;
+            const version = `${(man && man.version) || '0'}:q${cfg.queryVersion}.${cfg.importQueryVersion || 0}`;
             let tsxParser = null;
             let tsxQuery = null;
+            let tsxImportQuery = null;
             if (cfg.tsxWasm) {
                 // A Query is compiled against ONE Language object — reusing
                 // `query` (compiled against the plain .ts grammar) on a tree
@@ -238,8 +263,19 @@ async function ensureLanguage(id) {
                 tsxParser = new wts.Parser();
                 tsxParser.setLanguage(tsxLanguage);
                 tsxQuery = new wts.Query(tsxLanguage, queryText);
+                if (importQueryText) tsxImportQuery = new wts.Query(tsxLanguage, importQueryText);
             }
-            return { parser, tsxParser, query, tsxQuery, version, Query: wts.Query, language };
+            return {
+                parser,
+                tsxParser,
+                query,
+                tsxQuery,
+                importQuery,
+                tsxImportQuery,
+                version,
+                Query: wts.Query,
+                language,
+            };
         } catch {
             return null;
         }
@@ -273,6 +309,10 @@ function parserFor(grammar, cfg, p) {
 function queryFor(grammar, cfg, p) {
     if (cfg.tsxExts && cfg.tsxExts.includes(extOf(p)) && grammar.tsxQuery) return grammar.tsxQuery;
     return grammar.query;
+}
+function importQueryFor(grammar, cfg, p) {
+    if (cfg.tsxExts && cfg.tsxExts.includes(extOf(p))) return grammar.tsxImportQuery;
+    return grammar.importQuery;
 }
 
 // ── symbol extraction ───────────────────────────────────────────────────
@@ -534,6 +574,70 @@ function lineOf(src, offset) {
     return line;
 }
 
+// F3's import/export edges, from grammars/<lang>/imports.scm — ONE generic
+// reading, shared by every language, no per-language code here (the
+// per-language work is in each imports.scm's capture shape, same split F1
+// already drew for symbols).
+//
+// Capture convention (see grammars/typescript/imports.scm for the full
+// rationale): a capture name is `<family>.<role>`, where `role` is `stmt`
+// (the grouping key — one edge per statement, even across several
+// specifier matches of it), `source` (the raw specifier text), `name` (a
+// name bound in THIS file) or `importedName` (its pre-alias name in the
+// source, when different). `family` becomes the edge's `kind` verbatim
+// ('import', 'reexport', 'modpath', …) — nothing here hardcodes which
+// families exist, so a language can introduce its own (Rust's `modpath`
+// for a `mod foo;` child-file declaration, which has no source text at
+// all) with no change to this function.
+function buildImports(src, tree, query) {
+    if (!query) return [];
+    const matches = query.matches(tree.rootNode);
+    const groups = new Map(); // "<family>:<start>:<end>" -> { family, node, source, names: [] }
+    for (const m of matches) {
+        let stmt = null;
+        let family = null;
+        let source = null;
+        const names = []; // { localCapture, importedCapture } pairs, one per specifier-shaped match
+        let local = null;
+        let imported = null;
+        for (const c of m.captures) {
+            const dot = c.name.lastIndexOf('.');
+            const role = dot === -1 ? c.name : c.name.slice(dot + 1);
+            const fam = dot === -1 ? c.name : c.name.slice(0, dot);
+            if (role === 'stmt') {
+                stmt = c;
+                family = fam;
+            } else if (role === 'source') source = c;
+            else if (role === 'name') local = c;
+            else if (role === 'importedName') imported = c;
+        }
+        if (!stmt) continue;
+        // A specifier match carries @name when it binds a local name (always
+        // true for an un-aliased one too, EXCEPT TypeScript's own pattern,
+        // whose `alias:` field is optional and absent for `bar` in `{bar}` —
+        // there only @importedName fires. Either capture alone is enough to
+        // know a specifier was here at all; the other one just defaults to it.
+        if (local) names.push({ local: local.node.text, imported: imported ? imported.node.text : local.node.text });
+        else if (imported) names.push({ local: imported.node.text, imported: imported.node.text });
+        const key = `${family}:${stmt.node.startIndex}:${stmt.node.endIndex}`;
+        let g = groups.get(key);
+        if (!g) {
+            g = { family, node: stmt.node, source: null, names: [] };
+            groups.set(key, g);
+        }
+        if (source && g.source == null) g.source = source.node.text;
+        g.names.push(...names);
+    }
+    return [...groups.values()].map((g) => ({
+        local: null,
+        from: g.source,
+        line: lineOf(src, g.node.startIndex),
+        kind: g.family,
+        reexport: g.family === 'reexport',
+        names: g.names.length ? g.names : null,
+    }));
+}
+
 // The one entry point parse.js's EXTRACTORS call, per language id. Returns
 // null (never throws) when the grammar is not loaded for this process — the
 // caller treats that exactly like "no extractor registered".
@@ -544,6 +648,7 @@ function extractFor(id, p, src) {
     const parser = parserFor(grammar, cfg, p);
     const tree = parser.parse(src);
     const { symbols, references } = buildSymbols(id, cfg, src, tree, queryFor(grammar, cfg, p));
+    const imports = buildImports(src, tree, importQueryFor(grammar, cfg, p));
     // Syntax errors are NOT stored here — that is validate.js's syntaxDiagnostics()
     // below, run fresh on whatever text is being validated (which is not
     // always this same parse: a candidate edit's text never reaches extract()
@@ -551,7 +656,7 @@ function extractFor(id, p, src) {
     // also keeps a broken file's row the same size as a healthy one's.
     return {
         symbols,
-        imports: [],
+        imports,
         exports: symbols.filter((s) => s.exported && !s.parent).map((s) => s.name),
         references,
         analyzerVersion: grammar.version,
@@ -604,7 +709,7 @@ function currentVersionFor(p) {
     if (!id) return null;
     const cfg = LANGUAGES[id];
     const man = loadManifest()[id];
-    return `${(man && man.version) || '0'}:q${cfg.queryVersion}`;
+    return `${(man && man.version) || '0'}:q${cfg.queryVersion}.${cfg.importQueryVersion || 0}`;
 }
 
 module.exports = {
@@ -615,5 +720,6 @@ module.exports = {
     syntaxDiagnostics,
     currentVersionFor,
     LANGUAGES,
+    buildImports,
     _resetForTest,
 };

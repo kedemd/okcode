@@ -207,6 +207,55 @@ function memberKeyName(src, m) {
     return null;
 }
 
+// F3: the names an ImportDeclaration's specifiers bind, paired with their
+// pre-alias name in the source module — `import Foo from …` and
+// `import * as ns from …` have no source-side name to pair against
+// ('default' / '*' are not identifiers the target file defines), so those
+// carry a synthetic `imported` rather than left null, consistent with
+// treesitter.js's generic reader always producing SOME pairing.
+function importNames(specifiers) {
+    return (specifiers || []).map((s) => {
+        if (s.type === 'ImportDefaultSpecifier') return { local: s.local.name, imported: 'default' };
+        if (s.type === 'ImportNamespaceSpecifier') return { local: s.local.name, imported: '*' };
+        return { local: s.local.name, imported: s.imported.name || s.imported.value };
+    });
+}
+
+// F3's cheap call-site references: every CallExpression/NewExpression's
+// callee, by line — "whatever acorn gives cheaply" (WORKPLAN F3), i.e. no
+// scope resolution, just the identifier or plain `.member` name at the
+// call site, the same shape treesitter.js's `@reference.call` captures use
+// so refs() can mark a hit `call: true` without caring which extractor ran.
+// A FULL walk, deliberately not depth-limited like the symbol walk above —
+// a call inside a deeply-nested callback is still a call site worth
+// knowing about, even though it earns no symbol of its own.
+function collectCalls(ast) {
+    const refs = [];
+    function calleeName(callee) {
+        if (callee.type === 'Identifier') return callee.name;
+        if (callee.type === 'MemberExpression' && !callee.computed && callee.property.type === 'Identifier') {
+            return callee.property.name;
+        }
+        return null;
+    }
+    function visit(node) {
+        if (!node || typeof node !== 'object' || typeof node.type !== 'string') return;
+        if (node.type === 'CallExpression' || node.type === 'NewExpression') {
+            const name = calleeName(node.callee);
+            if (name) refs.push({ name, kind: 'call', line: node.loc.start.line });
+        }
+        for (const key in node) {
+            if (key === 'loc' || key === 'start' || key === 'end' || key === 'range') continue;
+            const v = node[key];
+            if (Array.isArray(v)) {
+                for (const c of v) visit(c);
+            } else visit(v);
+        }
+    }
+    for (const node of ast.body) visit(node);
+    return refs;
+}
+
 // Parse once, try script then module. sourceType matters: an .mjs parsed as a
 // script fails on `import`, which is exactly the honest failure acorn gives
 // and a regex would have papered over.
@@ -545,7 +594,19 @@ function extractJavaScript(path, src) {
             return;
         }
         if (node.type === 'ImportDeclaration') {
-            imports.push({ local: null, from: node.source.value, line: node.loc.start.line, esm: true });
+            // F3: `names` is the LOCAL binding each specifier introduces
+            // (what refs() compares a hit's text against) paired with its
+            // pre-alias name in the source module (what the TARGET file
+            // defines) — same shape treesitter.js's generic imports reader
+            // produces for the other languages, so edges.js's resolver
+            // never has to know which extractor a file went through.
+            imports.push({
+                local: null,
+                from: node.source.value,
+                line: node.loc.start.line,
+                esm: true,
+                names: importNames(node.specifiers),
+            });
         } else if (node.type === 'ExportNamedDeclaration' || node.type === 'ExportDefaultDeclaration') {
             const decl = node.declaration;
             const isDefault = node.type === 'ExportDefaultDeclaration';
@@ -585,6 +646,15 @@ function extractJavaScript(path, src) {
                     line: node.loc.start.line,
                     esm: true,
                     reexport: true,
+                    // `export { x as y } from './m'` keeps `local` as the
+                    // SOURCE's own name (`x`, what './m' defines) — nothing
+                    // in this file binds `y`, so `local` is what importers()
+                    // following the re-export one hop (F3) needs to match
+                    // against './m''s symbols, not this statement's alias.
+                    names: (node.specifiers || []).map((s) => ({
+                        local: s.local.name,
+                        imported: s.exported ? s.exported.name || s.exported.value : s.local.name,
+                    })),
                 });
         } else if (node.type === 'ExportAllDeclaration') {
             // `export * from './m'` / `export * as ns from './m'` — a
@@ -597,6 +667,7 @@ function extractJavaScript(path, src) {
                 line: node.loc.start.line,
                 esm: true,
                 reexport: true,
+                names: null,
             });
         } else if (node.type === 'ExpressionStatement') {
             const e = node.expression;
@@ -623,7 +694,7 @@ function extractJavaScript(path, src) {
     const exported = new Set(exports);
     for (const s of symbols) if (!s.parent && exported.has(s.name)) s.exported = true;
 
-    return { symbols, imports, exports };
+    return { symbols, imports, exports, references: collectCalls(ast) };
 }
 
 registerExtractor('javascript', extractJavaScript);

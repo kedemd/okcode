@@ -824,6 +824,21 @@ function createTools({ workspace, workspaces = () => [], grepMaxChars = 12000 } 
                   : o.by === 'symbol'
                     ? 'symbols'
                     : 'chunks (no parser structure)';
+        // F3's importers(), surfaced here rather than as its own tool — "who
+        // uses this file" is the same question an outline already answers
+        // for "what is in it", and the deliverable is explicit that a
+        // resolved edge belongs on an EXISTING surface, not a new one.
+        // Library code is never indexed, so it has no resolved edges at all.
+        let importerLine = '';
+        if (!o.library && typeof ws.importers === 'function') {
+            const imp = await ws.importers(o.file, { limit: 8 });
+            if (imp.ok && imp.importers.length) {
+                const shown = imp.importers
+                    .map((i) => `${i.file}:${i.line}${i.via ? ` (via ${i.via})` : ''}`)
+                    .join(', ');
+                importerLine = `\n  used by: ${shown}${imp.truncated ? `, … ${imp.total - imp.importers.length} more` : ''}`;
+            }
+        }
         return (
             `${o.file} — ${o.lines} lines in ${o.total} ${what}${o.library ? '  (library code, read directly — not indexed)' : `  at=${o.at}`}\n` +
             o.symbols
@@ -833,6 +848,7 @@ function createTools({ workspace, workspaces = () => [], grepMaxChars = 12000 } 
                 )
                 .join('\n') +
             (o.truncated ? `\n  [${o.total} pieces, showing the first ${o.symbols.length}]` : '') +
+            importerLine +
             (o.by === 'section'
                 ? `\n  [read any one with code_read "<file>:<from>-<to>", a heading also as "<file>#<heading>"]`
                 : `\n  [read any one with code_read "<file>:<from>-<to>"]`)
@@ -871,7 +887,12 @@ function createTools({ workspace, workspaces = () => [], grepMaxChars = 12000 } 
             hits
                 .map((h) =>
                     uses
-                        ? `  ${h.file}:${h.line}  in ${h.symbol}  — ${h.text}`
+                        // F3: `label` ranks the hit (local/imported/textual —
+                        // see ws.refs()'s own doc for what each means) and
+                        // `call` marks an actual call site, not just a
+                        // mention — both compact, one tag each, never a new
+                        // field a caller has to look past.
+                        ? `  ${h.file}:${h.line}  in ${h.symbol}  [${h.label}${h.call ? ', call' : ''}]  — ${h.text}`
                         : `  ${h.kind} ${h.path || h.name}  ${h.file}:${h.lines}  (${h.span} lines)${h.signature ? `\n      ${h.signature}` : ''}${h.doc ? `\n      ${h.doc}` : ''}`,
                 )
                 .join('\n')

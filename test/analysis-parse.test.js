@@ -118,7 +118,7 @@ test('reaching INSIDE a closure: methods on the object a factory returns', () =>
 
 test('imports: require edges, ESM imports and re-exports', () => {
     const cjs = extract('a.js', "const fs = require('fs');\nconst { x } = require('./x');\n");
-    assert.deepEqual(cjs.imports, [{ local: 'fs', from: 'fs', line: 1 }]);
+    assert.deepEqual(cjs.imports, [{ local: 'fs', from: 'fs', line: 1 }], 'a bare require has no names list — only ESM specifiers name a symbol');
     assert.equal(cjs.symbols.length, 0, 'a top-level require is an edge, not a symbol');
     const esm = extract(
         'a.mjs',
@@ -175,9 +175,9 @@ test('export default { ... }: function-valued members become symbols, plain data
 test('export * and export * as ns are re-export edges, shaped like export { x } from', () => {
     const r = extract('a.mjs', "export * from './m.js';\nexport * as ns from './n.js';\nexport { y } from './o.js';\n");
     assert.deepEqual(r.imports, [
-        { local: null, from: './m.js', line: 1, esm: true, reexport: true },
-        { local: null, from: './n.js', line: 2, esm: true, reexport: true },
-        { local: null, from: './o.js', line: 3, esm: true, reexport: true },
+        { local: null, from: './m.js', line: 1, esm: true, reexport: true, names: null },
+        { local: null, from: './n.js', line: 2, esm: true, reexport: true, names: null },
+        { local: null, from: './o.js', line: 3, esm: true, reexport: true, names: [{ local: 'y', imported: 'y' }] },
     ]);
     assert.deepEqual(r.exports, ['ns', 'y']);
 });

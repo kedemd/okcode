@@ -127,7 +127,11 @@ for (const fac of facades()) {
             const { ws } = await setup();
             const uses = await ws.refs('TAX_RATE');
             assert.ok(uses.length >= 1);
-            assert.ok(uses.every((u) => u.confidence === 'textual' && typeof u.symbol === 'string'));
+            // F3: every use here is in lib/math.js, the same file that
+            // defines TAX_RATE, so each is labelled `local`, not `textual`
+            // — the blanket "everything is textual" assumption predates
+            // ranking/labelling.
+            assert.ok(uses.every((u) => u.confidence === 'local' && u.label === 'local' && typeof u.symbol === 'string'));
             assert.ok(
                 !uses.some((u) => u.file === 'lib/math.js' && /^const TAX_RATE/.test(u.text)),
                 'declaration is not a use',

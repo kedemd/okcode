@@ -899,9 +899,13 @@ function createTools({ workspace, workspaces = () => [], grepMaxChars = 12000 } 
             : '';
         // A cut page always ends with the exact continuation (offset=N),
         // same as code_grep — never a count with no way to ask for the rest.
+        // A capped scan with no further page is still partial: say so, or the
+        // last page reads as the whole answer.
         const continuation =
             hits.truncated && hits.next != null
                 ? `\n  [showing ${hits.length} of ${hits.capped ? `at least ${hits.atLeast ?? hits.total ?? '?'}` : hits.total} — continue with offset=${hits.next}]`
+                : hits.capped
+                ? `\n  [PARTIAL: the scan stopped at ${hits.atLeast ?? hits.total ?? '?'} matches — search a more specific name${uses ? '' : ' or pass a path'}]`
                 : '';
         return (
             `${uses ? 'Uses' : 'Definitions'} of "${q}" in ${where}:\n` +

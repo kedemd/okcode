@@ -135,6 +135,43 @@ test('imports: require edges, ESM imports and re-exports', () => {
     assert.deepEqual(esm.exports, ['d']);
 });
 
+// Known gap closed (WORKPLAN "Known gaps": "methods of an anonymous
+// `export default { … }` object are not extracted as symbols") — needed by
+// ext-okjs.js (F4 item 1) to nest a component's members under its tag, but
+// the fix lives here because it is not OKJS-specific: any plain `.mjs`
+// exporting an anonymous object factory had the same blind spot.
+test('export default { ... }: function-valued members become symbols, plain data does not', () => {
+    const src = [
+        '// A tiny component-shaped object.',
+        "import { x } from './x.js';",
+        'export default {',
+        "    tag: 'x-card',",
+        '    context() {',
+        '        return {',
+        '            refresh() { return 1; },',
+        '            label: 2,',
+        '        };',
+        '    },',
+        "    template: `<div></div>`,",
+        '};',
+        '',
+    ].join('\n');
+    const r = extract('a.mjs', src);
+    assert.equal(r.parsed, true, r.reason);
+    const s = byPath(r);
+    assert.ok(s.has('context'), 'the method earns a name at the top level, same as any factory return');
+    assert.equal(s.get('context').parent, undefined, 'top level: no parent field at all');
+    assert.ok(s.has('context.refresh'), 'nested inside the object context() returns, same as any factory');
+    assert.equal(s.get('context.refresh').parent, 'context');
+    assert.ok(!s.has('tag'), 'a plain data property earns no symbol');
+    assert.ok(!s.has('context.label'), 'a plain data property inside a nested object earns no symbol either');
+    assert.ok(!s.has('template'), 'a template literal is data, not a symbol');
+    assert.deepEqual(r.exports, ['default']);
+    // The import is unaffected — this fix is only about the exported object's
+    // own members, not the rest of the file.
+    assert.deepEqual(r.imports.map((i) => i.from), ['./x.js']);
+});
+
 test('export * and export * as ns are re-export edges, shaped like export { x } from', () => {
     const r = extract('a.mjs', "export * from './m.js';\nexport * as ns from './n.js';\nexport { y } from './o.js';\n");
     assert.deepEqual(r.imports, [

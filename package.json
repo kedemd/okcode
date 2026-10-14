@@ -22,7 +22,7 @@
         "node": ">=20"
     },
     "dependencies": {
-        "@kedem/okdb": "^2.4.0",
+        "@kedem/okdb": "^2.6.4",
         "acorn": "^8.18.0"
     },
     "peerDependencies": {

@@ -2799,24 +2799,15 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
             // checked BEFORE symbol count: an okjs file carries exactly one
             // coarse symbol (the component tag), which would otherwise hide
             // the template/style breakdown a caller wants to read or edit by
-            // piece. `source: 'script'` regions (one import statement) are
-            // reference-sized, not a "piece". Each piece addresses through the
-            // same `file:from-to` range syntax, so read()/editBatch() need
-            // nothing new to reach one.
-            const analysis = extensionFor(fresh.path) ? await analysisOf(fresh) : null;
-            const regions = analysis
-                ? (analysis.regions || [])
-                      .filter((r) => r.source === 'definition' || r.source === 'block')
-                      .map((r) => ({ region: r, span: r.contentRange || r.valueRange || r.range }))
-                      .filter(({ span }) => span && span.end > span.start)
-                      .map(({ region, span }) => ({
-                          name: region.role || region.kind,
-                          kind: region.kind,
-                          lineStart: span.loc.start.line,
-                          lineEnd: Math.max(span.loc.start.line, span.loc.end.line),
-                          doc: [region.role, region.format || region.language].filter(Boolean).join(' ') || null,
-                      }))
-                : [];
+            // piece. Each piece addresses through the same `file:from-to`
+            // range syntax, so read()/editBatch() need nothing new to reach
+            // one. The extension already normalized these to
+            // `{ name, kind, lineStart, lineEnd, doc }` — this never
+            // interprets a dialect's own region shape (F4 item 2: that
+            // stayed OKJS-specific knowledge inside ext-okjs.js); the side
+            // effect of analysisOf() caches them on `fresh.regions`.
+            if (extensionFor(fresh.path)) await analysisOf(fresh);
+            const regions = fresh.regions || [];
             if (regions.length) {
                 const all = String((await textOfFresh(fresh.path)) || '').split('\n');
                 const cut = [];

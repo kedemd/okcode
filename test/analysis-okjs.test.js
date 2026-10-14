@@ -159,6 +159,101 @@ test(
     },
 );
 
+// F4 item 1: the component tag used to be the ONLY symbol a `.ok.js` file
+// produced — `find('mount')` had no symbol to reach, only grep/FTS. Now the
+// generic acorn extractor ALSO runs, and its symbols for the member functions
+// nest under the tag (`x-card.mount`), while a helper declared OUTSIDE the
+// `export default {...}` stays top-level, exactly as it would in plain JS.
+const CARD_WITH_HELPER = [
+    '// A module-level helper, never part of the component definition.',
+    'function clampWidth(n) {',
+    '    return Math.max(0, n);',
+    '}',
+    '',
+    CARD,
+].join('\n');
+
+test(
+    "with @kedem/okjs: the generic extractor's symbols nest under the component tag",
+    { skip: !hasTooling && 'okjs tooling not installed' },
+    () => {
+        const r = extract('card.ok.js', CARD_WITH_HELPER);
+        assert.equal(r.parsed, true, r.reason);
+        const tag = r.symbols.find((s) => s.kind === 'component');
+        assert.equal(tag.name, 'x-card');
+        const mount = r.symbols.find((s) => s.path === 'x-card.mount');
+        assert.ok(mount, 'mount() is addressable under the tag, not only inside the one big component symbol');
+        assert.equal(mount.parent, 'x-card');
+        assert.equal(mount.kind, 'method');
+        assert.equal(CARD_WITH_HELPER.slice(mount.start, mount.end).trim().startsWith('mount()'), true);
+        const helper = r.symbols.find((s) => s.path === 'clampWidth');
+        assert.ok(helper, 'a top-level helper outside the definition stays top-level');
+        assert.equal(helper.parent, undefined);
+        // Imports on the merged result are still the ANALYSER's own, never
+        // acorn's — CARD has no import statement, so this just proves the
+        // generic extractor's (empty) import list was discarded, not merged.
+        assert.deepEqual(r.imports, []);
+    },
+);
+
+test(
+    'with @kedem/okjs: regions are normalized ({ name, kind, lineStart, lineEnd, doc }), not the raw analyser shape',
+    { skip: !hasTooling && 'okjs tooling not installed' },
+    () => {
+        const r = extract('card.ok.js', CARD);
+        assert.ok(Array.isArray(r.regions) && r.regions.length);
+        for (const region of r.regions) {
+            assert.deepEqual(
+                Object.keys(region).sort(),
+                ['doc', 'kind', 'lineEnd', 'lineStart', 'name'],
+                'ext-okjs.js must hand workspace.js the normalized shape, never source/contentRange/valueRange/role',
+            );
+            assert.equal(typeof region.lineStart, 'number');
+            assert.equal(typeof region.lineEnd, 'number');
+        }
+        assert.ok(r.regions.some((x) => x.kind === 'template'));
+        assert.ok(r.regions.some((x) => x.kind === 'style'));
+    },
+);
+
+// `.ok.html` has no generic extractor of its own — only the `<script>`
+// block is JavaScript. Nesting there needs the extra step of running acorn
+// on just that block and shifting its byte/line coordinates back into the
+// whole file (ext-okjs.js's shiftSymbols/lineAt), since acorn otherwise
+// numbers everything from the block's own line 1.
+const CARD_HTML = [
+    '<template></template>',
+    '<script type="module">',
+    'function helper() { return 1; }',
+    'export default {',
+    "    tag: 'x-thing',",
+    '    mount() { return helper(); },',
+    '};',
+    '</script>',
+    '<style></style>',
+    '',
+].join('\n');
+
+test(
+    'with @kedem/okjs: .ok.html nests the <script> block symbols too, with whole-file coordinates',
+    { skip: !hasTooling && 'okjs tooling not installed' },
+    () => {
+        const r = extract('thing.ok.html', CARD_HTML);
+        assert.equal(r.parsed, true, r.reason);
+        const tag = r.symbols.find((s) => s.kind === 'component');
+        assert.equal(tag.name, 'x-thing');
+        const mount = r.symbols.find((s) => s.path === 'x-thing.mount');
+        assert.ok(mount, 'the <script> block member is addressable under the tag');
+        assert.equal(mount.parent, 'x-thing');
+        assert.equal(mount.lineStart, 6, 'line numbers are WHOLE-FILE, not relative to the <script> block');
+        assert.equal(CARD_HTML.slice(mount.start, mount.end), 'mount() { return helper(); }');
+        const helper = r.symbols.find((s) => s.path === 'helper');
+        assert.ok(helper, 'a module-level helper above the definition stays top-level');
+        assert.equal(helper.lineStart, 3);
+        assert.equal(CARD_HTML.slice(helper.start, helper.end), 'function helper() { return 1; }');
+    },
+);
+
 test(
     '.ok.html gets structural validation; plain .html gets none',
     { skip: !hasTooling && 'okjs tooling not installed' },

@@ -196,7 +196,9 @@ function fromBoundaries(text, marks) {
         // CHUNK_MAX (minified source). (An `if`, not a loop: the recursion is
         // the loop.)
         if (end - start > CHUNK_MAX) {
-            const nl = text.lastIndexOf('\n', start + CHUNK_MAX);
+            // `- 1`: the cut lands AFTER the newline, so a newline at exactly
+            // start + CHUNK_MAX would make a chunk one byte over the cap.
+            const nl = text.lastIndexOf('\n', start + CHUNK_MAX - 1);
             const cut = nl > start + CHUNK / 2 ? nl + 1 : start + CHUNK_MAX;
             chunks.push({ text: text.slice(start, cut), start, end: cut });
             const rest = marks.slice(i);

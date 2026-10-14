@@ -351,7 +351,7 @@ async function importers(ws) {
     if (!r.importers.length) return out(`nothing in ${r.file} imports it (resolved edges only — see refs for a text scan)`);
     out(`\n${r.total} importer(s) of ${r.file}${r.truncated ? ` (showing ${r.importers.length})` : ''}\n`);
     for (const i of r.importers) {
-        out(`  ${i.file}:${i.line}  ${i.kind}${i.via ? `  (via ${i.via})` : ''}${i.names ? `  ${i.names.map((n) => n.local).join(', ')}` : ''}`);
+        out(`  ${i.file}:${i.line}${i.kind ? `  ${i.kind}` : ''}${i.via ? `  (via ${i.via})` : ''}${i.names ? `  ${i.names.map((n) => n.local).join(', ')}` : ''}`);
     }
 }
 

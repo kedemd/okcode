@@ -709,7 +709,11 @@ function currentVersionFor(p) {
     if (!id) return null;
     const cfg = LANGUAGES[id];
     const man = loadManifest()[id];
-    return `${(man && man.version) || '0'}:q${cfg.queryVersion}.${cfg.importQueryVersion || 0}`;
+    // Without the optional runtime the file is indexed symbol-less; saying so
+    // in the version keeps that row from re-staling on every scan, and makes
+    // installing the runtime later reparse it.
+    const none = requireRuntimeOnce() ? '' : ':none';
+    return `${(man && man.version) || '0'}:q${cfg.queryVersion}.${cfg.importQueryVersion || 0}${none}`;
 }
 
 module.exports = {

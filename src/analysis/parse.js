@@ -407,8 +407,11 @@ function extract(path, src) {
             reason: `${lang} — searchable, no symbol extractor yet`,
         };
     }
+    // Stamped on success AND failure: a row that does not carry the current
+    // version is re-ingested on the next scan even when its hash never moved.
+    const analyzerVersion = analyzerVersionFor(path);
     try {
-        return { path, lang, lines, ...extractor(path, src), parsed: true, indexed: true };
+        return { path, lang, lines, ...extractor(path, src), analyzerVersion, parsed: true, indexed: true };
     } catch (err) {
         return {
             path,
@@ -419,9 +422,23 @@ function extract(path, src) {
             exports: [],
             parsed: false,
             indexed: true,
+            analyzerVersion,
             reason: String(err.message).slice(0, 160),
         };
     }
+}
+
+// What a stored row's `analyzerVersion` must equal for its symbols, imports
+// and call sites to be trusted without re-parsing (extensions stamp their own,
+// see extract()). Bump JS_ANALYZER_VERSION whenever extractJavaScript starts
+// extracting something it used to miss: stores written before carry no
+// version, or an older one, and re-ingest those files once.
+const JS_ANALYZER_VERSION = 'js:2'; // 2: import names (incl. destructured require), call-site references (F3)
+function analyzerVersionFor(path) {
+    const ext = extensionFor(path);
+    if (ext) return ext.version;
+    if (langOf(path) === 'javascript') return JS_ANALYZER_VERSION;
+    return treesitter.currentVersionFor(path);
 }
 
 // How far in to keep naming things.
@@ -520,8 +537,27 @@ function extractJavaScript(path, src) {
     // that is not a statement.
     function variables(decl, span, parent, depth, prevEnd, exported = false) {
         for (const d of decl.declarations) {
-            if (!d.id || d.id.type !== 'Identifier') continue;
             const init = d.init || {};
+            // `const { a, b: c } = require('./x')` — the commonest CommonJS
+            // import there is. Its bindings are names in the TARGET file, the
+            // same `names` an ESM `import { a, b as c }` carries.
+            if (
+                !parent &&
+                !exported &&
+                d.id &&
+                d.id.type === 'ObjectPattern' &&
+                init.type === 'CallExpression' &&
+                init.callee &&
+                init.callee.name === 'require'
+            ) {
+                const from = init.arguments[0] && init.arguments[0].value;
+                const names = d.id.properties
+                    .filter((p) => p.type === 'Property' && p.value && p.value.type === 'Identifier')
+                    .map((p) => ({ local: p.value.name, imported: p.key.name || p.key.value }));
+                if (typeof from === 'string') imports.push({ local: null, from, line: decl.loc.start.line, names });
+                continue;
+            }
+            if (!d.id || d.id.type !== 'Identifier') continue;
             // A top-level require() is an import edge, not a symbol. An
             // EXPORTED one is a binding the file exposes, so it stays a symbol.
             if (
@@ -724,6 +760,7 @@ module.exports = {
     registerExtractor,
     TEXT_MAX,
     parseSource,
+    analyzerVersionFor,
     // Exposed so ext-okjs.js can run the SAME generic extractor on a
     // `.ok.js`/`.ok.mjs` file's JavaScript (or a `.ok.html` file's <script>
     // block) and nest its symbols under the component tag — required

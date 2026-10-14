@@ -118,7 +118,14 @@ test('reaching INSIDE a closure: methods on the object a factory returns', () =>
 
 test('imports: require edges, ESM imports and re-exports', () => {
     const cjs = extract('a.js', "const fs = require('fs');\nconst { x } = require('./x');\n");
-    assert.deepEqual(cjs.imports, [{ local: 'fs', from: 'fs', line: 1 }], 'a bare require has no names list — only ESM specifiers name a symbol');
+    assert.deepEqual(
+        cjs.imports,
+        [
+            { local: 'fs', from: 'fs', line: 1 },
+            { local: null, from: './x', line: 2, names: [{ local: 'x', imported: 'x' }] },
+        ],
+        'a bare require binds the module; a destructured one names symbols, like ESM specifiers',
+    );
     assert.equal(cjs.symbols.length, 0, 'a top-level require is an edge, not a symbol');
     const esm = extract(
         'a.mjs',

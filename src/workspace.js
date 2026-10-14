@@ -23,7 +23,7 @@
 
 const crypto = require('crypto');
 const pathPosix = require('path').posix;
-const { extract, langOf, isTextual, isSecret } = require('./analysis/parse');
+const { extract, langOf, isTextual, isSecret, analyzerVersionFor } = require('./analysis/parse');
 const { extensionFor } = require('./analysis/extensions');
 const treesitter = require('./analysis/treesitter');
 const { createEdgeIndex } = require('./edges');
@@ -746,13 +746,10 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
             // right. `analyzerVersion` is stamped by extract() on every
             // extension-analysed file; a mismatch against the extension's
             // current version forces the same re-ingest a hash change would.
-            const ext = extensionFor(row.path);
-            const tsVersion = treesitter.currentVersionFor(row.path);
+            const version = wantsText ? analyzerVersionFor(row.path) : null;
             const restale =
                 unchanged &&
-                (wantsText !== (prior.indexed !== false) ||
-                    (ext && prior.analyzerVersion !== ext.version) ||
-                    (tsVersion && prior.analyzerVersion !== tsVersion));
+                (wantsText !== (prior.indexed !== false) || (version && prior.analyzerVersion !== version));
             if (unchanged && !restale) {
                 prior.size = h.size;
                 prior.mtime = h.mtime;
@@ -768,12 +765,8 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
         // primitive exists to take.
         for (const { row, prior } of untouched) {
             const wantsText = isTextual(row.path, row.size);
-            const ext = extensionFor(row.path);
-            const tsVersion = treesitter.currentVersionFor(row.path);
-            const restale =
-                wantsText !== (prior.indexed !== false) ||
-                (ext && prior.analyzerVersion !== ext.version) ||
-                (tsVersion && prior.analyzerVersion !== tsVersion);
+            const version = wantsText ? analyzerVersionFor(row.path) : null;
+            const restale = wantsText !== (prior.indexed !== false) || (version && prior.analyzerVersion !== version);
             if (!restale) continue;
             if (wantsText) toRead.push(row);
             else opaque.push({ ...row, hash: prior.hash });

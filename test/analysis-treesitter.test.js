@@ -461,6 +461,57 @@ test('C++: namespace/class/method (in-class and out-of-line)/enum/template/attri
     assert.equal(r.analyzerVersion, treesitter.currentVersionFor('sample.cpp'));
 });
 
+test('signature: the full definition up to its BODY, not just the first line — multi-line params, per language', () => {
+    const ts = [
+        'export async function createUser(',
+        '  name: string,',
+        '  age: number,',
+        '): Promise<User> {',
+        '  return { name, age };',
+        '}',
+        '',
+    ].join('\n');
+    const tsSym = extract('multi.ts', ts).symbols.find((s) => s.name === 'createUser');
+    // `export` wraps the declaration one level up (see the typescript entry
+    // in treesitter.js's LANGUAGES table) — the signature, like the
+    // definition's span, starts at the function itself.
+    assert.equal(tsSym.signature, 'async function createUser(name: string, age: number): Promise<User>');
+
+    const py = ['def create_user(', '    name,', '    age,', '):', '    return {name: name, age: age}', ''].join('\n');
+    const pySym = extract('multi.py', py).symbols.find((s) => s.name === 'create_user');
+    assert.equal(pySym.signature, 'def create_user(name, age)');
+
+    const go = ['package main', '', 'func CreateUser(', '\tname string,', '\tage int,', ') string {', '\treturn name', '}', ''].join('\n');
+    const goSym = extract('multi.go', go).symbols.find((s) => s.name === 'CreateUser');
+    assert.equal(goSym.signature, 'func CreateUser(name string, age int) string');
+
+    const rust = ['pub fn create_user(', '    name: String,', '    age: i32,', ') -> String {', '    name', '}', ''].join('\n');
+    const rustSym = extract('multi.rs', rust).symbols.find((s) => s.name === 'create_user');
+    assert.equal(rustSym.signature, 'pub fn create_user(name: String, age: i32) -> String');
+
+    const php = ['<?php', 'function createUser(', '    string $name,', '    int $age', ') {', '    return $name;', '}', ''].join('\n');
+    const phpSym = extract('multi.php', php).symbols.find((s) => s.name === 'createUser');
+    assert.equal(phpSym.signature, 'function createUser(string $name, int $age)');
+});
+
+test('signature: no body (an interface method, a bare declaration) is the whole node up to `;`/end', () => {
+    const ts = ['export interface Shape {', '  area(radius: number): number;', '}', ''].join('\n');
+    const sym = extract('nobody.ts', ts).symbols.find((s) => s.name === 'area');
+    // The grammar's `method_signature` node itself does not span the
+    // trailing `;` (a sibling token in `interface_body`) — the signature
+    // follows the node's own end, same as every other symbol's span does.
+    assert.equal(sym.signature, 'area(radius: number): number');
+});
+
+test('signature: capped at a sane length, with an explicit … when cut — never a silent truncation', () => {
+    const params = Array.from({ length: 60 }, (_, i) => `paramNumber${i}: string`).join(', ');
+    const ts = `export function manyParams(${params}): void {\n  return;\n}\n`;
+    const sym = extract('capped.ts', ts).symbols.find((s) => s.name === 'manyParams');
+    assert.ok(sym.signature.length <= 301, sym.signature.length);
+    assert.ok(sym.signature.endsWith('…'), sym.signature);
+    assert.ok(sym.signature.startsWith('function manyParams(paramNumber0'), sym.signature);
+});
+
 test('a broken file in each language: parsed structure still empty, no crash', () => {
     for (const [p, src] of [
         ['broken.ts', TS_BROKEN],

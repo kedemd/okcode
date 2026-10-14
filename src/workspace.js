@@ -2373,6 +2373,171 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
                 }
                 return best;
             };
+            // The core ranking, factored out so a path-scoped search (below)
+            // can rank the FULL set of matches inside the path instead of
+            // paging an inner window first (the old bug: a path filter over
+            // an undersized inner fetch could both miss real hits and mislabel
+            // its own window as `capped`). `ftsLimit` widens the two full-text
+            // eyes for that case; the substring eyes already scan every file
+            // regardless. Returns the full ranked array, unsliced, plus
+            // whether either full-text eye itself hit its fetch cap (the only
+            // honest meaning of `capped` left once the universe is otherwise
+            // whole).
+            const rankAll = async (ftsLimit) => {
+                // A symbol found by both indexes is ONE hit: the better score
+                // wins, and `alsoVia` records the other eyes. A later, weaker
+                // channel must not overwrite `via` — the label is how a caller
+                // judges how much to trust a hit.
+                const out = new Map();
+                const offer = (hit) => {
+                    const k = `${hit.file}:${hit.path || hit.name}`;
+                    const prior = out.get(k);
+                    if (!prior) {
+                        out.set(k, hit);
+                        return;
+                    }
+                    const strong = hit.score > prior.score ? hit : prior;
+                    const weak = strong === hit ? prior : hit;
+                    const also = new Set([...(strong.alsoVia || []), ...(weak.alsoVia || [])]);
+                    if (weak.via && weak.via !== strong.via) also.add(weak.via);
+                    out.set(k, {
+                        ...strong,
+                        ...(also.size ? { alsoVia: [...also] } : {}),
+                        // A quote is worth keeping even when the name match won: it
+                        // is the only channel that can say WHICH line matched.
+                        quote: strong.quote || weak.quote || null,
+                    });
+                };
+                const symbolHit = (f, s, extra) => ({
+                    name: s.name,
+                    kind: s.kind,
+                    file: f.rel,
+                    path: s.path || s.name,
+                    parent: s.parent || null,
+                    lines: `${s.lineStart}-${s.lineEnd}`,
+                    span: s.lineEnd - s.lineStart + 1,
+                    signature: s.signature || null,
+                    doc: (s.doc || '').slice(0, 160) || null,
+                    exported: !!s.exported,
+                    at: f.hash,
+                    ...extra,
+                });
+
+                // Open BEFORE querying the store, so a full-text hit is checked
+                // against the graph as it is now: a symbol whose file has since
+                // been deleted lives on in the store until the next flush.
+                await ensureOpen();
+                // Both full-text indexes, strictly, then both loosely — and only
+                // if strict found nothing ANYWHERE.
+                let symbolHits = store ? store.search(query, ftsLimit, 'and') : null;
+                let contentHits = store ? store.searchContent(query, Math.max(6, ftsLimit), { mode: 'and' }) : null;
+                // A LOOSE pass returns "shares some words with the question" — a
+                // weaker claim than any strict match and weaker than a semantic
+                // one, so it is scored below both.
+                let loose = false;
+                if (
+                    store &&
+                    String(query).trim().split(/\s+/).length > 1 &&
+                    !(symbolHits || []).length &&
+                    !(contentHits || []).length
+                ) {
+                    loose = true;
+                    symbolHits = store.search(query, ftsLimit, 'or');
+                    contentHits = store.searchContent(query, Math.max(6, ftsLimit), { mode: 'or' });
+                }
+                const PROSE = loose ? 18 : 40;
+                const CONTENT = loose ? 16 : 35;
+                // The ladder, top to bottom: exact name 100, name prefix 70, name
+                // substring 50, PROSE via full-text 40, prose via substring 25,
+                // content 35. No prose match outranks a name match: searching
+                // "budget" wants DEFAULT_BUDGET before three symbols that mention
+                // budgets in passing.
+                for (const h of symbolHits || []) {
+                    if (kind && h.kind !== kind) continue;
+                    const f = byRel(h.file);
+                    if (!f) continue;
+                    offer(
+                        symbolHit(f, h, {
+                            score: nameScore(h.name, h.path) || PROSE,
+                            via: loose ? 'fts~' : 'fts',
+                            relevance: h.relevance || 0,
+                        }),
+                    );
+                }
+                // Substring matching still runs and merges: FTS misses partial
+                // identifiers, and the two are complementary rather than redundant.
+                for (const f of list()) {
+                    for (const s of f.symbols || []) {
+                        if (kind && s.kind !== kind) continue;
+                        const score = nameScore(s.name, s.path) || ((s.doc || '').toLowerCase().includes(q) ? 25 : 0);
+                        if (!score) continue;
+                        offer(symbolHit(f, s, { score }));
+                    }
+                }
+                // The content eye. A hit on the FILE is not an answer — "it is
+                // somewhere in dashboard.js" is what the caller already suspected
+                // — so every matched line is attributed to the symbol containing
+                // it. These are the only hits that quote FILE TEXT, so these are
+                // the files verified before a single window is cut.
+                if (contentHits && contentHits.length) await verify(contentHits.map((h) => h.file));
+                for (const hit of contentHits || []) {
+                    const f = byRel(hit.file);
+                    if (!f || typeof f.content !== 'string') continue;
+                    const lines = quoteLines(f.content, query, 3);
+                    // Lines group by the symbol containing them, best citation
+                    // wins — otherwise the survivor is whichever line came FIRST.
+                    const best = new Map();
+                    for (const ln of lines.length ? lines : [{ line: 1, text: '', n: 0 }]) {
+                        const owner = ownerOf(f, ln.line);
+                        const key = owner ? owner.path || owner.name : f.rel;
+                        const prior = best.get(key);
+                        if (!prior || (ln.n || 0) > (prior.ln.n || 0)) best.set(key, { owner, ln });
+                    }
+                    for (const { owner, ln } of best.values()) {
+                        // `quote` stays a one-line label; `window` is what a
+                        // caller reads, with its own line range.
+                        const win = windowAt(f, ln.line, owner);
+                        const common = {
+                            score: CONTENT,
+                            via: loose ? 'content~' : 'content',
+                            relevance: hit.relevance,
+                            quote: `${f.rel}:${ln.line}  ${ln.text}`,
+                            line: ln.line,
+                            window: win,
+                        };
+                        offer(
+                            owner
+                                ? symbolHit(f, owner, common)
+                                : {
+                                      name: f.rel,
+                                      kind: f.lang,
+                                      file: f.rel,
+                                      path: f.rel,
+                                      parent: null,
+                                      // A file-level hit spans the window it shows,
+                                      // not the single line it matched.
+                                      lines: win ? `${win.lineStart}-${win.lineEnd}` : `${ln.line}-${ln.line}`,
+                                      span: win ? win.lineEnd - win.lineStart + 1 : 1,
+                                      signature: null,
+                                      doc: null,
+                                      exported: false,
+                                      at: f.hash,
+                                      ...common,
+                                  },
+                        );
+                    }
+                }
+                // Tier first (how the query matched), then full-text relevance
+                // inside the tier, then the smaller symbol.
+                const ranked = [...out.values()].sort(
+                    (a, b) => b.score - a.score || (b.relevance || 0) - (a.relevance || 0) || a.span - b.span,
+                );
+                // Only the two full-text eyes have a fetch cap at all (the
+                // substring eyes above already walk every file); `capped` is
+                // honest only when one of them actually hit it.
+                const ftsCapped = (symbolHits || []).length >= ftsLimit || (contentHits || []).length >= Math.max(6, ftsLimit);
+                return { ranked, capped: ftsCapped };
+            };
             // Scoped to a PATH. A library path is looked up BY NAME (and doc
             // prose) in that subtree's in-memory scan (scanLibrary) — never
             // by meaning, never through the store, which holds none of it.
@@ -2417,174 +2582,34 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
                 }
                 const inPath = pathMatcher({ paths: [path] });
                 if (inPath) {
-                    // The inner call is widened, not just by `limit`: a path
-                    // filter can throw away most of what it fetches, and a
-                    // narrow inner window would silently starve this of hits
-                    // that exist further down the unfiltered ranking.
+                    // Rank the FULL set of matches, like refs() does, THEN
+                    // filter to the path and page — never page an inner
+                    // window first (the old bug: an undersized inner fetch
+                    // both missed real hits further down the unfiltered
+                    // ranking and mislabeled its own window as `capped`). The
+                    // full-text eyes are widened well past any plausible
+                    // page so they too cover "the whole workspace" in
+                    // practice; `capped` now means only that ONE of them hit
+                    // its own fetch ceiling, a safety floor, not this path's
+                    // size.
                     const off = Number(offset) > 0 ? Math.floor(Number(offset)) : 0;
-                    const inner = await api.find(query, { kind, limit: Math.max((off + limit) * 5, 200) }, _retried);
-                    const filtered = inner.filter((h) => inPath(h.file));
+                    const { ranked, capped } = await rankAll(20000);
+                    const filtered = ranked.filter((h) => inPath(h.file));
                     const res = filtered.slice(off, off + limit);
+                    if (!_retried && res.length) {
+                        if ((await resultSetCheck(res.map((h) => h.file))).changed) {
+                            return api.find(query, { kind, limit, offset, path }, true);
+                        }
+                    }
                     res.total = filtered.length;
                     res.offset = off;
-                    // The inner fetch is itself a cap: when IT was truncated,
-                    // `filtered.length` is only what the inner window held,
-                    // not the whole workspace's — `capped` says this total is
-                    // a floor, not an exhaustive count.
-                    res.capped = !!inner.truncated;
-                    res.truncated = off + res.length < filtered.length || res.capped;
+                    res.capped = capped;
+                    res.truncated = off + res.length < filtered.length;
                     res.next = res.truncated ? off + res.length : null;
                     return res;
                 }
             }
-            // A symbol found by both indexes is ONE hit: the better score
-            // wins, and `alsoVia` records the other eyes. A later, weaker
-            // channel must not overwrite `via` — the label is how a caller
-            // judges how much to trust a hit.
-            const out = new Map();
-            const offer = (hit) => {
-                const k = `${hit.file}:${hit.path || hit.name}`;
-                const prior = out.get(k);
-                if (!prior) {
-                    out.set(k, hit);
-                    return;
-                }
-                const strong = hit.score > prior.score ? hit : prior;
-                const weak = strong === hit ? prior : hit;
-                const also = new Set([...(strong.alsoVia || []), ...(weak.alsoVia || [])]);
-                if (weak.via && weak.via !== strong.via) also.add(weak.via);
-                out.set(k, {
-                    ...strong,
-                    ...(also.size ? { alsoVia: [...also] } : {}),
-                    // A quote is worth keeping even when the name match won: it
-                    // is the only channel that can say WHICH line matched.
-                    quote: strong.quote || weak.quote || null,
-                });
-            };
-            const symbolHit = (f, s, extra) => ({
-                name: s.name,
-                kind: s.kind,
-                file: f.rel,
-                path: s.path || s.name,
-                parent: s.parent || null,
-                lines: `${s.lineStart}-${s.lineEnd}`,
-                span: s.lineEnd - s.lineStart + 1,
-                signature: s.signature || null,
-                doc: (s.doc || '').slice(0, 160) || null,
-                exported: !!s.exported,
-                at: f.hash,
-                ...extra,
-            });
-
-            // Open BEFORE querying the store, so a full-text hit is checked
-            // against the graph as it is now: a symbol whose file has since
-            // been deleted lives on in the store until the next flush.
-            await ensureOpen();
-            // Both full-text indexes, strictly, then both loosely — and only
-            // if strict found nothing ANYWHERE.
-            let symbolHits = store ? store.search(query, limit, 'and') : null;
-            let contentHits = store ? store.searchContent(query, Math.max(6, limit), { mode: 'and' }) : null;
-            // A LOOSE pass returns "shares some words with the question" — a
-            // weaker claim than any strict match and weaker than a semantic
-            // one, so it is scored below both.
-            let loose = false;
-            if (
-                store &&
-                String(query).trim().split(/\s+/).length > 1 &&
-                !(symbolHits || []).length &&
-                !(contentHits || []).length
-            ) {
-                loose = true;
-                symbolHits = store.search(query, limit, 'or');
-                contentHits = store.searchContent(query, Math.max(6, limit), { mode: 'or' });
-            }
-            const PROSE = loose ? 18 : 40;
-            const CONTENT = loose ? 16 : 35;
-            // The ladder, top to bottom: exact name 100, name prefix 70, name
-            // substring 50, PROSE via full-text 40, prose via substring 25,
-            // content 35. No prose match outranks a name match: searching
-            // "budget" wants DEFAULT_BUDGET before three symbols that mention
-            // budgets in passing.
-            for (const h of symbolHits || []) {
-                if (kind && h.kind !== kind) continue;
-                const f = byRel(h.file);
-                if (!f) continue;
-                offer(
-                    symbolHit(f, h, {
-                        score: nameScore(h.name, h.path) || PROSE,
-                        via: loose ? 'fts~' : 'fts',
-                        relevance: h.relevance || 0,
-                    }),
-                );
-            }
-            // Substring matching still runs and merges: FTS misses partial
-            // identifiers, and the two are complementary rather than redundant.
-            for (const f of list()) {
-                for (const s of f.symbols || []) {
-                    if (kind && s.kind !== kind) continue;
-                    const score = nameScore(s.name, s.path) || ((s.doc || '').toLowerCase().includes(q) ? 25 : 0);
-                    if (!score) continue;
-                    offer(symbolHit(f, s, { score }));
-                }
-            }
-            // The content eye. A hit on the FILE is not an answer — "it is
-            // somewhere in dashboard.js" is what the caller already suspected
-            // — so every matched line is attributed to the symbol containing
-            // it. These are the only hits that quote FILE TEXT, so these are
-            // the files verified before a single window is cut.
-            if (contentHits && contentHits.length) await verify(contentHits.map((h) => h.file));
-            for (const hit of contentHits || []) {
-                const f = byRel(hit.file);
-                if (!f || typeof f.content !== 'string') continue;
-                const lines = quoteLines(f.content, query, 3);
-                // Lines group by the symbol containing them, best citation
-                // wins — otherwise the survivor is whichever line came FIRST.
-                const best = new Map();
-                for (const ln of lines.length ? lines : [{ line: 1, text: '', n: 0 }]) {
-                    const owner = ownerOf(f, ln.line);
-                    const key = owner ? owner.path || owner.name : f.rel;
-                    const prior = best.get(key);
-                    if (!prior || (ln.n || 0) > (prior.ln.n || 0)) best.set(key, { owner, ln });
-                }
-                for (const { owner, ln } of best.values()) {
-                    // `quote` stays a one-line label; `window` is what a
-                    // caller reads, with its own line range.
-                    const win = windowAt(f, ln.line, owner);
-                    const common = {
-                        score: CONTENT,
-                        via: loose ? 'content~' : 'content',
-                        relevance: hit.relevance,
-                        quote: `${f.rel}:${ln.line}  ${ln.text}`,
-                        line: ln.line,
-                        window: win,
-                    };
-                    offer(
-                        owner
-                            ? symbolHit(f, owner, common)
-                            : {
-                                  name: f.rel,
-                                  kind: f.lang,
-                                  file: f.rel,
-                                  path: f.rel,
-                                  parent: null,
-                                  // A file-level hit spans the window it shows,
-                                  // not the single line it matched.
-                                  lines: win ? `${win.lineStart}-${win.lineEnd}` : `${ln.line}-${ln.line}`,
-                                  span: win ? win.lineEnd - win.lineStart + 1 : 1,
-                                  signature: null,
-                                  doc: null,
-                                  exported: false,
-                                  at: f.hash,
-                                  ...common,
-                              },
-                    );
-                }
-            }
-            // Tier first (how the query matched), then full-text relevance
-            // inside the tier, then the smaller symbol.
-            const ranked = [...out.values()].sort(
-                (a, b) => b.score - a.score || (b.relevance || 0) - (a.relevance || 0) || a.span - b.span,
-            );
+            const { ranked } = await rankAll(limit);
             const off = Number(offset) > 0 ? Math.floor(Number(offset)) : 0;
             const results = ranked.slice(off, off + limit);
             // RESULT-SET CHECK: this additionally catches a file a symbol hit
@@ -3210,6 +3235,39 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
                 }
                 return false;
             };
+            // A Go `pkg.Fn()` (or a Python `mod.fn()` after `import mod` /
+            // `import a.b as mod`) qualifies its call with the PACKAGE/
+            // MODULE's own bound name, not a symbol this file imported
+            // directly — `importedFrom` above only catches the latter (Go
+            // imports a package, never a name inside it; `fileDefines`
+            // there checks a name this file binds, which a qualified call
+            // never does). Go binds the import path's last segment, or its
+            // alias; Python's unaliased `import mod` binds the module
+            // itself — `import a.b.c` binds only `a`, and resolving
+            // `a.fn()` would need to know `a` is a PACKAGE rather than
+            // necessarily this submodule, so that multi-segment unaliased
+            // case is left textual (cheap, not exhaustive).
+            const qualPattern = new RegExp(`(^|[^\\w.])([A-Za-z_$][\\w$]*)\\.${q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
+            const qualifiedCall = (f, text) => {
+                if (f.lang !== 'go' && f.lang !== 'python') return false;
+                const m = qualPattern.exec(text);
+                if (!m) return false;
+                const alias = m[2];
+                for (const e of edges.importsOf(f.rel)) {
+                    if (!e.to) continue;
+                    if (f.lang === 'go') {
+                        if (e.kind !== 'import') continue;
+                        const bound = (e.names && e.names[0] && e.names[0].local) || (e.from || '').split('/').pop();
+                        if (bound === alias && fileDefines(e.to, q)) return true;
+                    } else {
+                        if (e.kind !== 'modimport') continue;
+                        const src = e.from || '';
+                        const bound = (e.names && e.names[0] && e.names[0].local) || (src.includes('.') ? null : src);
+                        if (bound && bound === alias && fileDefines(e.to, q)) return true;
+                    }
+                }
+                return false;
+            };
             // `references` is either freshly-parsed (every kind tree-sitter's
             // tags.scm captures: call/type/class/implementation) or loaded
             // back from the store, already trimmed to call sites only (see
@@ -3217,7 +3275,11 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
             // honest about meaning "a CALL landed here", not any reference.
             const callAt = (f, ln) => (f.references || []).some((r) => r.line === ln && r.name === q && (!r.kind || r.kind === 'call'));
             const out = raw.map((h) => {
-                const label = definesLocally(h.f) ? 'local' : importedFrom(h.f) ? 'imported' : 'textual';
+                const label = definesLocally(h.f)
+                    ? 'local'
+                    : importedFrom(h.f) || qualifiedCall(h.f, h.text)
+                      ? 'imported'
+                      : 'textual';
                 return {
                     file: h.f.rel,
                     line: h.ln,

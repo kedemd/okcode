@@ -210,8 +210,12 @@ for (const fac of facades()) {
                     !/no indexed file matching/.test(noOutline.reason),
             );
             const lit = await ws.mentions('TAX_RATE = 0.17', { limit: 5 });
-            assert.deepEqual(lit, [{ rel: 'lib/math.js', line: 9 }]);
-            assert.deepEqual(await ws.mentions('ThisStringIsNowhereInTheFixture'), []);
+            assert.deepEqual([...lit], [{ rel: 'lib/math.js', line: 9 }]);
+            assert.equal(lit.total, 1);
+            assert.equal(lit.truncated, false);
+            const none = await ws.mentions('ThisStringIsNowhereInTheFixture');
+            assert.deepEqual([...none], []);
+            assert.equal(none.total, 0);
         });
 
         it('outlines by symbol, and by chunk when a file has none', async () => {

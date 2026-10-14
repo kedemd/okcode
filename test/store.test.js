@@ -187,7 +187,7 @@ describe('store', () => {
         const row = st.env.get('files', '.env');
         assert.ok(row && row.indexed === false && /^[0-9A-F]{40}$/.test(row.hash), JSON.stringify(row));
         assert.deepEqual(st.searchContent('hunter2zebra', 5), []);
-        assert.deepEqual(await ws.mentions('hunter2zebra'), []);
+        assert.deepEqual([...(await ws.mentions('hunter2zebra'))], []);
         assert.equal((await ws.readFile('.env')).ok, false);
         await ws.close();
     });

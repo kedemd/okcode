@@ -186,3 +186,24 @@ test('declaration-file helpers', () => {
         ],
     );
 });
+
+// No-silent-cuts: the surface/members cap (500/1500 — generous, "should
+// never fire") still has to SAY SO on the rare package big enough to hit it,
+// not just hand back a quietly shorter list that answers "no" about a name
+// that is there.
+test('readPackages: a surface/members cap that fires is reported, not silent', async () => {
+    const names = Array.from({ length: 520 }, (_, i) => `name${i}`);
+    const dts = names.map((n) => `export declare function ${n}(): void;`).join('\n') + '\n';
+    const access = memoryAccess({
+        'package.json': json({ name: 'fixture', version: '1.0.0', dependencies: { big: '^1.0.0' } }),
+        'node_modules/big/package.json': json({ name: 'big', version: '9.0.0', types: './index.d.ts' }),
+        'node_modules/big/index.d.ts': dts,
+    });
+    const packages = await readPackages(access, ['big']);
+    const big = packages.get('big');
+    assert.equal(big.surface.length, 500, 'the cap still applies');
+    assert.equal(big.surfaceTruncated, true, 'but hitting it is reported');
+    // Comfortably under the members cap: that flag must stay unset, so a
+    // truncation report never shows up on a package that was never cut.
+    assert.ok(!big.membersTruncated);
+});

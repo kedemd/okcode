@@ -153,7 +153,7 @@ describe('embedding profiles', () => {
         assert.equal(profiles[0].status.vector_count, profiles[1].status.vector_count);
 
         // No lexical eye can answer this: "patience" is nowhere in the code.
-        assert.deepEqual(await ws.find('patience'), []);
+        assert.deepEqual([...(await ws.find('patience'))], []);
         for (const profile of ['small', 'wide']) {
             const hits = await ws.ask('patience', { profile, limit: 5 });
             assert.ok(hits.length > 0, profile);

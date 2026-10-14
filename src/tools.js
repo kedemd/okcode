@@ -416,7 +416,12 @@ function createTools({ workspace, workspaces = () => [], grepMaxChars = 12000 } 
                             : '';
                     return `  [${how}] ${h.path || h.name}  ${where}${body}`;
                 })
-                .join('\n')
+                .join('\n') +
+            // Fused top-K, not a ranked page over a known universe (ask()'s
+            // own doc explains why): raising `limit` asks each eye to look
+            // wider, it does not just slice a longer list that was already
+            // computed.
+            (hits.truncated ? `\n  [top ${hits.length} match(es) — raise limit to search deeper]` : '')
         );
     }
 
@@ -431,8 +436,8 @@ function createTools({ workspace, workspaces = () => [], grepMaxChars = 12000 } 
                 : [
                       `${p.name}@${p.version || '?'} (${p.source})${p.description ? ` — ${p.description}` : ''}`,
                       `entry: ${p.main || '(none)'}${p.types ? `   types: ${p.types}` : ''}`,
-                      `exports (${p.surfaceFrom || 'not found'}): ${(p.surface || []).join(', ') || '(none)'}`,
-                      (p.members || []).length ? `members: ${p.members.join(', ')}` : '',
+                      `exports (${p.surfaceFrom || 'not found'}): ${(p.surface || []).join(', ') || '(none)'}${p.surfaceTruncated ? `  [PARTIAL: cut at ${p.surface.length} names]` : ''}`,
+                      (p.members || []).length ? `members: ${p.members.join(', ')}${p.membersTruncated ? `  [PARTIAL: cut at ${p.members.length} names]` : ''}` : '',
                   ]
                       .filter(Boolean)
                       .join('\n');
@@ -748,8 +753,9 @@ function createTools({ workspace, workspaces = () => [], grepMaxChars = 12000 } 
             );
         }
         return (
-            `Lines containing "${q}" in ${ws.id} (${hits.length}${hits.length >= limit ? '+' : ''}):\n` +
+            `Lines containing "${q}" in ${ws.id} (${hits.total ?? hits.length}):\n` +
             hits.map((h) => `  ${h.rel}:${h.line}`).join('\n') +
+            (hits.truncated && hits.next != null ? `\n  [showing ${hits.length} — continue with offset=${hits.next}]` : '') +
             `\n  [exact text only — read one with code_read "<file>:<from>-<to>" to see it in context]`
         );
     }
@@ -758,15 +764,18 @@ function createTools({ workspace, workspaces = () => [], grepMaxChars = 12000 } 
         const pats = listArg(a.pattern ?? a.glob ?? a.query ?? a.path);
         if (!pats) return '(code_glob) — needs `pattern`: a glob such as "src/**/*.js", "*.test.js" or "components".';
         const limit = num(a.limit) ?? 200;
+        const offset = num(a.offset) || 0;
         let r;
-        if (typeof ws.glob === 'function') r = await ws.glob(pats, { limit });
+        if (typeof ws.glob === 'function') r = await ws.glob(pats, { limit, offset });
         else {
             // A host whose workspace object predates glob(): the same match
             // over the listing it already has.
             const listed = await ws.files({});
             const m = pathMatcher({ glob: pats });
             const all = listed.files.filter((f) => !m || m(f.file));
-            r = { ok: true, total: all.length, truncated: all.length > limit, files: all.slice(0, limit) };
+            const files = all.slice(offset, offset + limit);
+            const truncated = offset + files.length < all.length;
+            r = { ok: true, total: all.length, offset, truncated, next: truncated ? offset + files.length : null, files };
         }
         if (!r.ok) return `(code_glob) — ${r.reason}`;
         const label = pats.join(' ');
@@ -779,7 +788,9 @@ function createTools({ workspace, workspaces = () => [], grepMaxChars = 12000 } 
                         `  ${f.file}${f.lines != null ? `  (${f.lines} lines)` : f.size != null ? `  (${f.size} bytes)` : ''}${f.indexed === false ? '  [not searchable]' : ''}`,
                 )
                 .join('\n') +
-            (r.truncated ? `\n  [showing ${r.files.length} of ${r.total} — narrow the glob or raise limit]` : '')
+            (r.truncated && r.next != null
+                ? `\n  [showing ${r.files.length} of ${r.total} from offset ${r.offset} — continue with offset=${r.next}]`
+                : '')
         );
     }
 
@@ -792,7 +803,8 @@ function createTools({ workspace, workspaces = () => [], grepMaxChars = 12000 } 
         // to choose, read to see.
         const f = relOf(ws, a.file || a.path || a.query || '');
         if (!f) return '(code_outline) — needs `file`: the path to break into pieces.';
-        const o = await ws.outline(f, { limit: Number(a.limit) || 60 });
+        const offset = num(a.offset) || 0;
+        const o = await ws.outline(f, { limit: Number(a.limit) || 60, offset });
         if (!o.ok) return `(code_outline "${f}") — ${toToolWords(o.reason)}`;
         // A library FOLDER: its files and their top-level names, parsed for
         // this answer (kept in memory, never indexed).
@@ -810,8 +822,8 @@ function createTools({ workspace, workspaces = () => [], grepMaxChars = 12000 } 
                         return `  ${e.file}  (${e.lines} lines)${names.length ? `  ${shown}` : ''}`;
                     })
                     .join('\n') +
-                (o.truncated
-                    ? `\n  [${o.total} files, showing the first ${o.entries.length} — raise limit or outline a subfolder]`
+                (o.truncated && o.next != null
+                    ? `\n  [${o.total} files, showing ${o.entries.length} from offset ${o.offset} — continue with offset=${o.next}]`
                     : '') +
                 `\n  [* = exported. code_outline one file for line ranges; code_find {query, path: "${o.dir}"} looks a name up here; code_grep with paths: ["${o.dir}"] searches its text]`
             );
@@ -847,7 +859,9 @@ function createTools({ workspace, workspaces = () => [], grepMaxChars = 12000 } 
                         `  ${String(s.span).padStart(4)}L  ${s.path}  ${s.name}${s.signature ? ` ${s.signature}` : ''}${s.doc ? `  — ${s.doc}` : ''}`,
                 )
                 .join('\n') +
-            (o.truncated ? `\n  [${o.total} pieces, showing the first ${o.symbols.length}]` : '') +
+            (o.truncated && o.next != null
+                ? `\n  [${o.total} pieces, showing ${o.symbols.length} from offset ${o.offset} — continue with offset=${o.next}]`
+                : '') +
             importerLine +
             (o.by === 'section'
                 ? `\n  [read any one with code_read "<file>:<from>-<to>", a heading also as "<file>#<heading>"]`
@@ -863,11 +877,13 @@ function createTools({ workspace, workspaces = () => [], grepMaxChars = 12000 } 
         if (uses && scope && typeof ws.isLibraryPath === 'function' && ws.isLibraryPath(scope)) {
             return `(code_find "${q}") — uses are not tracked in library code (${scope} is never indexed). Use code_grep with paths: ["${scope}"] to find where it appears.`;
         }
+        const limit = Number(a.limit) || (uses ? 30 : 15);
+        const offset = num(a.offset) || 0;
         let hits;
         try {
             hits = uses
-                ? await ws.refs(q, { limit: Number(a.limit) || 30 })
-                : await ws.find(q, { limit: Number(a.limit) || 15, kind: a.kind || null, path: scope });
+                ? await ws.refs(q, { limit, offset })
+                : await ws.find(q, { limit, offset, kind: a.kind || null, path: scope });
         } catch (err) {
             if (err && err.code === 'OKCODE_BAD_PATH') return `(code_find "${q}") — ${err.message}`;
             throw err;
@@ -881,6 +897,12 @@ function createTools({ workspace, workspaces = () => [], grepMaxChars = 12000 } 
             : hits.library
             ? `  [library code, looked up by name in a direct parse of ${hits.library.files} file(s) — not indexed${hits.library.truncated ? '; PARTIAL: the parse cap stopped the listing, narrow the path' : ''}]\n`
             : '';
+        // A cut page always ends with the exact continuation (offset=N),
+        // same as code_grep — never a count with no way to ask for the rest.
+        const continuation =
+            hits.truncated && hits.next != null
+                ? `\n  [showing ${hits.length} of ${hits.capped ? `at least ${hits.atLeast ?? hits.total ?? '?'}` : hits.total} — continue with offset=${hits.next}]`
+                : '';
         return (
             `${uses ? 'Uses' : 'Definitions'} of "${q}" in ${where}:\n` +
             lib +
@@ -895,7 +917,8 @@ function createTools({ workspace, workspaces = () => [], grepMaxChars = 12000 } 
                         ? `  ${h.file}:${h.line}  in ${h.symbol}  [${h.label}${h.call ? ', call' : ''}]  — ${h.text}`
                         : `  ${h.kind} ${h.path || h.name}  ${h.file}:${h.lines}  (${h.span} lines)${h.signature ? `\n      ${h.signature}` : ''}${h.doc ? `\n      ${h.doc}` : ''}`,
                 )
-                .join('\n')
+                .join('\n') +
+            continuation
         );
     }
 
@@ -1116,6 +1139,7 @@ function createTools({ workspace, workspaces = () => [], grepMaxChars = 12000 } 
                             'Only under this directory or file. A library path ("node_modules/<pkg>") looks names up in that package, parsed directly (by name, not by meaning)',
                     },
                     limit: { type: 'number', description: 'Max hits (default 15; 30 for uses)' },
+                    offset: { type: 'number', description: 'Resume at this position in the ranked list — use the offset a cut-off answer names' },
                 },
                 req('query'),
             ),
@@ -1189,6 +1213,7 @@ function createTools({ workspace, workspaces = () => [], grepMaxChars = 12000 } 
                             'One or more globs; "!pattern" excludes. Without "/" a glob matches a name at any depth; a glob matching a directory lists everything under it.',
                     },
                     limit: { type: 'number', description: 'Max files listed (default 200)' },
+                    offset: { type: 'number', description: 'Resume at this position — use the offset a cut-off answer names' },
                 },
                 req('pattern'),
             ),
@@ -1202,6 +1227,7 @@ function createTools({ workspace, workspaces = () => [], grepMaxChars = 12000 } 
                             'Workspace-relative path (as the other tools report it); a library folder such as "node_modules/<pkg>" too',
                     },
                     limit: { type: 'number', description: 'Max pieces (default 60)' },
+                    offset: { type: 'number', description: 'Resume at this piece position — use the offset a cut-off answer names' },
                 },
                 req('file'),
             ),

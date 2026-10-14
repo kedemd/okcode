@@ -497,6 +497,141 @@ function resolvePhpRequire(fromFile, spec, index) {
     return null;
 }
 
+// ── Java ─────────────────────────────────────────────────────────────────
+// Java has no project-config file this module reads (no composer.json/
+// go.mod equivalent) — a `.java` file's own `package` declaration
+// (captured as a `module`-kind symbol, grammars/java/tags.local.scm) IS
+// the authority, derived entirely from stored symbols like everything
+// else here. Built once per generation (buildJavaIndex, called from
+// ensure()). `import a.b.C;` naming a class nowhere in this workspace
+// (the JDK, a dependency jar) stays unresolved, never guessed.
+function buildJavaIndex(filesList) {
+    const byFqcn = new Map(); // "pkg.Class" -> file
+    const byPackage = new Map(); // "pkg" -> [file, ...]
+    for (const f of filesList) {
+        if (f.lang !== 'java') continue;
+        const pkg = (f.symbols || []).find((s) => s.kind === 'module' && !s.parent);
+        const pkgName = pkg ? pkg.name : '';
+        if (pkgName) {
+            if (!byPackage.has(pkgName)) byPackage.set(pkgName, []);
+            byPackage.get(pkgName).push(f.rel);
+        }
+        // A package declaration is a header LINE, not a wrapping block —
+        // unlike C#'s namespace, it never CONTAINS its file's types, so
+        // the generic nesting rule never sets their `parent`; a top-level
+        // type's own package is this file's package, full stop.
+        for (const s of f.symbols || []) {
+            if (s.parent || !['class', 'interface', 'enum'].includes(s.kind)) continue;
+            byFqcn.set(pkgName ? `${pkgName}.${s.name}` : s.name, f.rel);
+        }
+    }
+    return { byFqcn, byPackage };
+}
+
+// `imp.kind`: `import` (a single class), `importstar` (`import a.b.*;` —
+// every class this workspace's index has under that package, not one
+// target, same "no single file" shape Go's directory import already
+// has), `staticimport` (`import static a.b.C.member;` — `@import.source`
+// is the FULL `a.b.C.member` text; the class/member split is found by
+// trying progressively shorter prefixes against `byFqcn`, longest first,
+// since nothing in the import text itself marks where the class ends).
+function resolveJavaImport(imp, javaIndex) {
+    const from = imp.from;
+    if (imp.kind === 'importstar') return (javaIndex.byPackage.get(from) || []).map((to) => ({ to, name: null }));
+    if (imp.kind === 'staticimport') {
+        const parts = from.split('.');
+        for (let i = parts.length - 1; i >= 1; i--) {
+            const file = javaIndex.byFqcn.get(parts.slice(0, i).join('.'));
+            if (file) return [{ to: file, name: parts.slice(i).join('.') }];
+        }
+        return [];
+    }
+    const file = javaIndex.byFqcn.get(from);
+    return file ? [{ to: file, name: null }] : [];
+}
+
+// ── C# ───────────────────────────────────────────────────────────────────
+// Same "derive from stored symbols, no extra config" shape as Java above.
+// `byNamespace` answers a plain `using A.B;`, which binds a NAMESPACE, not
+// a file — every file that DECLARES it is a target, same multi-file shape
+// as Java's `importstar`; `byFqcn` answers a `using X = A.B.C;` ALIAS,
+// which names one TYPE. A class nested inside another class (rather than
+// directly inside a namespace) is a documented gap: its stored `parent`
+// is the outer class, not the namespace, so `byFqcn` builds an
+// incomplete (class-qualified, not namespace-qualified) key for it.
+function buildCsharpIndex(filesList) {
+    const byFqcn = new Map();
+    const byNamespace = new Map();
+    for (const f of filesList) {
+        if (f.lang !== 'csharp') continue;
+        for (const s of f.symbols || []) {
+            if (s.kind === 'module') {
+                if (!byNamespace.has(s.name)) byNamespace.set(s.name, []);
+                byNamespace.get(s.name).push(f.rel);
+            } else if (['class', 'interface', 'enum'].includes(s.kind)) {
+                byFqcn.set(s.parent ? `${s.parent}.${s.name}` : s.name, f.rel);
+            }
+        }
+    }
+    return { byFqcn, byNamespace };
+}
+
+function resolveCsharpImport(imp, csharpIndex) {
+    if (imp.kind === 'alias') {
+        const file = csharpIndex.byFqcn.get(imp.from);
+        const aliasName = imp.names && imp.names[0] ? imp.names[0].local : null;
+        return file ? [{ to: file, name: aliasName }] : [];
+    }
+    return (csharpIndex.byNamespace.get(imp.from) || []).map((to) => ({ to, name: null }));
+}
+
+// ── C / C++ ──────────────────────────────────────────────────────────────
+// `#include "x.h"`: relative to the including file's own directory, then
+// the workspace root, then a directory some OTHER include already proved
+// to be a root — computed once, in two passes, so the result does not
+// depend on which file happens to get resolved first. Pass 1 (this
+// function): every quoted include that resolves relative to ITS OWN
+// file's directory marks that directory a proven root. `#include <x.h>`
+// stays unresolved unless it matches a path under a directory literally
+// named `include` — never a basename guess across the whole index.
+function computeCIncludeRoots(filesList, index) {
+    const provenRoots = new Set();
+    for (const f of filesList) {
+        if (f.lang !== 'c' && f.lang !== 'cpp') continue;
+        const dir = pathPosix.dirname(f.rel) === '.' ? '' : pathPosix.dirname(f.rel);
+        for (const imp of f.imports || []) {
+            if (imp.kind === 'include' && index.has(normJoin(dir, imp.from))) provenRoots.add(dir);
+        }
+    }
+    const includeDirs = [...new Set(filesList.map((f) => pathPosix.dirname(f.rel)).filter((d) => pathPosix.basename(d) === 'include'))].sort();
+    return { provenRoots, includeDirs };
+}
+
+function resolveCInclude(fromFile, spec, cRoots, index) {
+    const ownDir = pathPosix.dirname(fromFile) === '.' ? '' : pathPosix.dirname(fromFile);
+    const own = normJoin(ownDir, spec);
+    if (index.has(own)) return own;
+    if (index.has(spec)) return spec; // workspace-root-relative
+    for (const root of [...cRoots.provenRoots].sort()) {
+        const cand = normJoin(root, spec);
+        if (index.has(cand)) return cand;
+    }
+    return null;
+}
+
+function resolveCSysInclude(spec, cRoots, index) {
+    // `system_lib_string`'s own text still carries its `<`/`>` — stripped
+    // here, not in the query (grammars/c/imports.scm has no inner content
+    // node to capture instead, unlike a quoted string literal's own
+    // `string_content`).
+    const bare = spec.replace(/^<|>$/g, '');
+    for (const dir of cRoots.includeDirs) {
+        const cand = normJoin(dir, bare);
+        if (index.has(cand)) return cand;
+    }
+    return null;
+}
+
 // ── per-file resolution ─────────────────────────────────────────────────
 
 function resolveFile(f, index, byRel, configs, rustTrees) {
@@ -582,6 +717,19 @@ function resolveFile(f, index, byRel, configs, rustTrees) {
             }
             continue;
         }
+        if (lang === 'java') {
+            for (const r of resolveJavaImport(imp, configs.javaIndex)) push(r.to, r.name);
+            continue;
+        }
+        if (lang === 'csharp') {
+            for (const r of resolveCsharpImport(imp, configs.csharpIndex)) push(r.to, r.name);
+            continue;
+        }
+        if (lang === 'c' || lang === 'cpp') {
+            if (imp.kind === 'include') push(resolveCInclude(f.rel, from, configs.cRoots, index), null);
+            else if (imp.kind === 'sysinclude') push(resolveCSysInclude(from, configs.cRoots, index), null);
+            continue;
+        }
         // A `style` dependency (a stylesheet an .ok.js/.ok.html pulls in) is
         // otherwise an ordinary relative specifier.
         if (isRelativeSpecifier(from)) {
@@ -639,6 +787,14 @@ function createEdgeIndex({ access }) {
             const tree = buildRustModuleTree(crate, byRel, index);
             for (const file of tree.fileToPath.keys()) rustTrees.set(file, tree);
         }
+        // Java/C#/C/C++ need no project-config file read off disk (no
+        // composer.json/go.mod equivalent consulted here) — their indexes
+        // are built entirely from this generation's own stored symbols and
+        // imports, the same rows every other language's resolver already
+        // reads, just bundled onto `configs` alongside the file-read ones.
+        configs.javaIndex = buildJavaIndex(filesList);
+        configs.csharpIndex = buildCsharpIndex(filesList);
+        configs.cRoots = computeCIncludeRoots(filesList, index);
 
         forward = new Map();
         for (const f of filesList) forward.set(f.rel, resolveFile(f, index, byRel, configs, rustTrees));

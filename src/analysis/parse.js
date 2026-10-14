@@ -69,6 +69,20 @@ const LANGS = {
     '.rs': 'rust',
     '.php': 'php',
     '.phtml': 'php',
+    '.java': 'java',
+    '.cs': 'csharp',
+    // `.h` defaults to the C grammar, not C++ — see treesitter.js's `c`
+    // LANGUAGES entry for why (and the documented limitation for a
+    // project whose `.h` files are actually C++).
+    '.c': 'c',
+    '.h': 'c',
+    '.cpp': 'cpp',
+    '.cc': 'cpp',
+    '.cxx': 'cpp',
+    '.hpp': 'cpp',
+    '.hh': 'cpp',
+    '.hxx': 'cpp',
+    '.ipp': 'cpp',
     '.json': 'json',
     '.jsonc': 'json',
     '.md': 'markdown',
@@ -745,7 +759,7 @@ registerExtractor('javascript', extractJavaScript);
 // above and reproduces EXACTLY the "no extractor" message the generic path
 // gives a language with nothing registered at all — grammars missing must
 // look identical to grammars never having been written.
-for (const id of ['typescript', 'python', 'go', 'rust', 'php']) {
+for (const id of ['typescript', 'python', 'go', 'rust', 'php', 'java', 'csharp', 'c', 'cpp']) {
     registerExtractor(id, (p, src) => {
         const result = treesitter.extractFor(id, p, src);
         if (!result) throw new Error(`${id} — searchable, no symbol extractor yet`);

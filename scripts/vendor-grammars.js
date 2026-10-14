@@ -73,6 +73,41 @@ const GRAMMARS = {
             LICENSE: 'LICENSE',
         },
     },
+    java: {
+        pkg: 'tree-sitter-java',
+        files: {
+            'tree-sitter-java.wasm': 'tree-sitter-java.wasm',
+            'queries/tags.scm': 'tags.scm',
+            LICENSE: 'LICENSE',
+        },
+    },
+    // tree-sitter-c-sharp ships its wasm as `tree-sitter-c_sharp.wasm`
+    // (underscore, not hyphen) — vendored under that same name rather than
+    // renamed, so it still traces back to the upstream file.
+    csharp: {
+        pkg: 'tree-sitter-c-sharp',
+        files: {
+            'tree-sitter-c_sharp.wasm': 'tree-sitter-c_sharp.wasm',
+            'queries/tags.scm': 'tags.scm',
+            LICENSE: 'LICENSE',
+        },
+    },
+    c: {
+        pkg: 'tree-sitter-c',
+        files: {
+            'tree-sitter-c.wasm': 'tree-sitter-c.wasm',
+            'queries/tags.scm': 'tags.scm',
+            LICENSE: 'LICENSE',
+        },
+    },
+    cpp: {
+        pkg: 'tree-sitter-cpp',
+        files: {
+            'tree-sitter-cpp.wasm': 'tree-sitter-cpp.wasm',
+            'queries/tags.scm': 'tags.scm',
+            LICENSE: 'LICENSE',
+        },
+    },
 };
 
 function main() {

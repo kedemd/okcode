@@ -31,7 +31,9 @@ describe('decorators/attributes belong to the symbol they decorate', () => {
     });
 
     before(async () => {
-        await Promise.all(['typescript', 'python', 'rust', 'php'].map((id) => treesitter.ensureLanguage(id)));
+        await Promise.all(
+            ['typescript', 'python', 'rust', 'php', 'java', 'csharp', 'cpp'].map((id) => treesitter.ensureLanguage(id)),
+        );
     });
 
     async function setup(files) {
@@ -110,6 +112,50 @@ describe('decorators/attributes belong to the symbol they decorate', () => {
         const outline = await ws.outline('user.php');
         const sym = outline.symbols.find((s) => s.path === 'User.getName');
         assert.equal(sym.signature, 'public function getName() {');
+    });
+
+    it("Java: an annotation is already part of the node's own span (bundled with the modifiers); read() shows it, and the signature skips the WHOLE modifiers node (not just the annotation)", async () => {
+        const src = ['class User {', '    @Deprecated', '    public String getName() {', '        return "x";', '    }', '}', ''].join(
+            '\n',
+        );
+        const { ws } = await setup({ 'user.java': src });
+        await ws.sync();
+        const r = await ws.read('user.java#User.getName');
+        assert.ok(r.ok, JSON.stringify(r));
+        assert.ok(r.body.startsWith('@Deprecated'), r.body);
+        const outline = await ws.outline('user.java');
+        const sym = outline.symbols.find((s) => s.path === 'User.getName');
+        // `public` is bundled into the SAME `modifiers` node as the
+        // annotation in this grammar (unlike PHP/C#) — skipping the
+        // annotation from the signature costs `public` too, a documented
+        // trade-off (DESIGN §12), not a bug.
+        assert.equal(sym.signature, 'String getName() {');
+    });
+
+    it("C#: an attribute is its own field, separate from the modifier(s); read() shows it, and the signature keeps `public` while skipping only the attribute", async () => {
+        const src = ['class User {', '    [Obsolete]', '    public string GetName() {', '        return "x";', '    }', '}', ''].join(
+            '\n',
+        );
+        const { ws } = await setup({ 'user.cs': src });
+        await ws.sync();
+        const r = await ws.read('user.cs#User.GetName');
+        assert.ok(r.ok, JSON.stringify(r));
+        assert.ok(r.body.startsWith('[Obsolete]'), r.body);
+        const outline = await ws.outline('user.cs');
+        const sym = outline.symbols.find((s) => s.path === 'User.GetName');
+        assert.equal(sym.signature, 'public string GetName() {');
+    });
+
+    it("C++: a `[[deprecated]]` attribute is already part of the (possibly widened) node's own span; read() shows it, and the signature skips it", async () => {
+        const src = ['[[deprecated]]', 'int helper() {', '    return 1;', '}', ''].join('\n');
+        const { ws } = await setup({ 'helper.cpp': src });
+        await ws.sync();
+        const r = await ws.read('helper.cpp#helper');
+        assert.ok(r.ok, JSON.stringify(r));
+        assert.ok(r.body.startsWith('[[deprecated]]'), r.body);
+        const outline = await ws.outline('helper.cpp');
+        const sym = outline.symbols.find((s) => s.name === 'helper');
+        assert.equal(sym.signature, 'int helper() {');
     });
 
     it('editBatch by symbol name still works, and a replacement body that OMITS the decorator removes it — the span is the source of truth', async () => {

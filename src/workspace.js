@@ -2806,8 +2806,10 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
             // interprets a dialect's own region shape (F4 item 2: that
             // stayed OKJS-specific knowledge inside ext-okjs.js); the side
             // effect of analysisOf() caches them on `fresh.regions`.
+            // Read back from the map: analysisOf() verifies first, and a file
+            // that moved since is a NEW record, not `fresh`.
             if (extensionFor(fresh.path)) await analysisOf(fresh);
-            const regions = fresh.regions || [];
+            const regions = (files.get(fresh.path) || fresh).regions || [];
             if (regions.length) {
                 const all = String((await textOfFresh(fresh.path)) || '').split('\n');
                 const cut = [];

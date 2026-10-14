@@ -14,5 +14,9 @@
     "rust": {
         "package": "tree-sitter-rust",
         "version": "0.24.0"
+    },
+    "php": {
+        "package": "tree-sitter-php",
+        "version": "0.24.2"
     }
 }

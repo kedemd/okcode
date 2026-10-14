@@ -59,6 +59,20 @@ const GRAMMARS = {
             LICENSE: 'LICENSE',
         },
     },
+    // tree-sitter-php ships TWO grammars: `php` (PHP with embedded HTML,
+    // parsed the way an actual file on disk reads — `<?php ... ?>` tags
+    // and all) and `php_only` (expects the `<?php` stripped already, for
+    // an eval()'d snippet). A real .php/.phtml file can carry inline HTML
+    // at any point, so `php` is the one that will not choke on an
+    // ordinary template; `queries/tags.scm` is written against it.
+    php: {
+        pkg: 'tree-sitter-php',
+        files: {
+            'tree-sitter-php.wasm': 'tree-sitter-php.wasm',
+            'queries/tags.scm': 'tags.scm',
+            LICENSE: 'LICENSE',
+        },
+    },
 };
 
 function main() {

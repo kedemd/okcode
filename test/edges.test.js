@@ -236,4 +236,66 @@ describe('F3 resolved edges + F4.3 okjs component usage', () => {
         assert.deepEqual((await ws.importers('src/Services/Mailer.php')).importers.map((i) => i.file), ['src/Controller.php']);
         assert.deepEqual((await ws.importers('src/Services/Logger.php')).importers.map((i) => i.file), ['src/Controller.php']);
     });
+
+    it('JS: a multi-name import (`import { a, b } from …`) resolves BOTH names, listing the importer once with both in `names`', async () => {
+        const { ws } = await setup({
+            'util.mjs': 'export function a() { return 1; }\nexport function b() { return 2; }\nexport function unused() { return 3; }\n',
+            'index.mjs': "import { a, b } from './util.mjs';\nfunction run() { return a() + b(); }\nexport { run };\n",
+        });
+        await ws.sync();
+        const r = await ws.importers('util.mjs');
+        assert.ok(r.ok);
+        // One row per STATEMENT, not one per name — the old `imp.names.length
+        // === 1` fast path dropped the resolved name for every multi-name
+        // import, but never duplicated the importer row either; this checks
+        // both halves stayed true after the fix.
+        assert.equal(r.importers.length, 1, JSON.stringify(r));
+        const row = r.importers[0];
+        assert.equal(row.file, 'index.mjs');
+        assert.deepEqual(
+            (row.names || []).map((n) => n.imported).sort(),
+            ['a', 'b'],
+        );
+        // refs() for EACH name individually resolves to 'imported', not just
+        // the first — exact per-symbol importership, not a fluke of
+        // whichever name used to win the old length-1 check.
+        const refsA = await ws.refs('a');
+        const refsB = await ws.refs('b');
+        assert.ok(refsA.some((h) => h.file === 'index.mjs' && h.label === 'imported'));
+        assert.ok(refsB.some((h) => h.file === 'index.mjs' && h.label === 'imported'));
+        // `unused` is never imported at all — importers(util.mjs) names it
+        // nowhere, proving this is real resolution, not "any name in the
+        // file counts".
+        assert.ok(!(row.names || []).some((n) => n.imported === 'unused'));
+    });
+
+    it('CommonJS: a destructured `require` resolves both names the same way', async () => {
+        const { ws } = await setup({
+            'util.js': 'function a() { return 1; }\nfunction b() { return 2; }\nmodule.exports = { a, b };\n',
+            'index.js': "const { a, b } = require('./util');\nfunction run() { return a() + b(); }\nmodule.exports = { run };\n",
+        });
+        await ws.sync();
+        const r = await ws.importers('util.js');
+        assert.ok(r.ok);
+        assert.equal(r.importers.length, 1, JSON.stringify(r));
+        assert.deepEqual(
+            (r.importers[0].names || []).map((n) => n.imported).sort(),
+            ['a', 'b'],
+        );
+    });
+
+    it('Go: a qualified call (`pkg.Fn()`) is labelled `imported`, not `textual`, once the package is resolved', async () => {
+        const { ws } = await setup({
+            'go.mod': 'module example.com/app\n\ngo 1.21\n',
+            'sub/util.go': 'package sub\n\nfunc Helper() int {\n\treturn 1\n}\n',
+            'main.go': 'package main\n\nimport "example.com/app/sub"\n\nfunc run() int {\n\treturn sub.Helper()\n}\n',
+        });
+        await treesitter.ensureLanguage('go');
+        await ws.sync();
+        const hits = await ws.refs('Helper');
+        const hit = hits.find((h) => h.file === 'main.go');
+        assert.ok(hit, JSON.stringify(hits));
+        assert.equal(hit.label, 'imported');
+        assert.equal(hit.call, true);
+    });
 });

@@ -528,14 +528,23 @@ function resolveFile(f, index, byRel, configs, rustTrees) {
         }
         const lang = f.lang;
         if (lang === 'javascript' || lang === 'typescript') {
+            // One push per imported name — `import { a, b } from './x'` (and
+            // a destructured `require`) binds TWO names, not one, and each
+            // deserves its own resolved record so `importers(file)` for a
+            // specific symbol is exact (not just true when the statement
+            // happened to name exactly one thing). All of them share the
+            // same target file (a single specifier resolves once), so
+            // `addImporter` below collapses them back to one row per
+            // statement — `names` on that row already carries every pair.
+            const names = imp.names && imp.names.length ? imp.names : [{ imported: null }];
             if (isRelativeSpecifier(from)) {
                 const found = resolveJsPath(normJoin(pathPosix.dirname(f.rel), from), index);
-                push(found, imp.names && imp.names.length === 1 ? imp.names[0].imported : null);
+                for (const n of names) push(found, n.imported);
             } else {
                 const found = resolveTsPaths(from, pathPosix.dirname(f.rel), configs.tsconfigs, index);
-                if (found) push(found, imp.names && imp.names.length === 1 ? imp.names[0].imported : null);
                 // else: a bare specifier with no paths match is an external
                 // package — left unresolved, never guessed.
+                if (found) for (const n of names) push(found, n.imported);
             }
             continue;
         }
@@ -644,9 +653,16 @@ function createEdgeIndex({ access }) {
         for (const f of filesList) forward.set(f.rel, resolveFile(f, index, byRel, configs, rustTrees));
 
         reverse = new Map();
+        // One row per (target, importing file, line, hop) — a multi-name
+        // import pushes one forward edge per name (above), all to the same
+        // target/line, so without this a caller would see the same import
+        // STATEMENT listed several times instead of once with every name in
+        // `names`.
         const addImporter = (target, entry) => {
             if (!reverse.has(target)) reverse.set(target, []);
-            reverse.get(target).push(entry);
+            const arr = reverse.get(target);
+            if (arr.some((x) => x.file === entry.file && x.line === entry.line && x.via === entry.via)) return;
+            arr.push(entry);
         };
         for (const [rel, edges] of forward) {
             for (const e of edges) {

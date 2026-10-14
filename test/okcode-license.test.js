@@ -81,10 +81,23 @@ const collect = () => {
 
 describe('okcode.open({ license })', () => {
     let base;
+    // This suite proves what happens with NO license, or a FORGED one —
+    // okdb installs OKDB_LICENSE_FILE at every open (DESIGN §9, no okcode
+    // code involved), so a license already sitting in this process's own
+    // env (inherited from whatever started the test run) would make the
+    // "no license"/"invalid license" cases see an already-active one
+    // instead. Cleared for this suite only, restored after.
+    let savedLicenseFile;
     before(() => {
         ({ base } = tmpRoot('lic'));
+        savedLicenseFile = process.env.OKDB_LICENSE_FILE;
+        delete process.env.OKDB_LICENSE_FILE;
     });
-    after(() => fs.rmSync(base, { recursive: true, force: true }));
+    after(() => {
+        fs.rmSync(base, { recursive: true, force: true });
+        if (savedLicenseFile === undefined) delete process.env.OKDB_LICENSE_FILE;
+        else process.env.OKDB_LICENSE_FILE = savedLicenseFile;
+    });
     const store = (name) => path.join(base, name);
 
     it(

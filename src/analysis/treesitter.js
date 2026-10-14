@@ -66,8 +66,11 @@ const LANGUAGES = {
         // Bumped for the decorator-span fix (DESIGN §12): a decorated
         // class/method/property's stored span used to start at the class/
         // method/property itself, not its `@decorator`(s) — every row
-        // needs a reparse to pick up the wider span.
-        queryVersion: 2,
+        // needs a reparse to pick up the wider span. Bumped again for the
+        // full-signature fix (DESIGN §12): `signature` used to be just the
+        // definition's first source line, truncating a multi-line parameter
+        // list.
+        queryVersion: 3,
         importQueryVersion: 1,
         comment: { line: '//', blockOpen: '/*', blockClose: '*/' },
         // `export` wraps the declaration one level up (`export class C {}`
@@ -88,8 +91,9 @@ const LANGUAGES = {
     python: {
         exts: ['.py'],
         wasm: 'tree-sitter-python.wasm',
-        // Bumped for the decorator-span fix — see the typescript entry above.
-        queryVersion: 2,
+        // Bumped for the decorator-span fix, then again for the
+        // full-signature fix — see the typescript entry above.
+        queryVersion: 3,
         importQueryVersion: 1,
         comment: { line: '#' },
         // PEP 8 convention, not syntax: a single leading underscore means
@@ -111,7 +115,9 @@ const LANGUAGES = {
     go: {
         exts: ['.go'],
         wasm: 'tree-sitter-go.wasm',
-        queryVersion: 1,
+        // Bumped for the full-signature fix — see the typescript entry
+        // above.
+        queryVersion: 2,
         importQueryVersion: 1,
         comment: { line: '//' },
         // Go's own export rule IS syntax: capitalised identifiers are
@@ -123,8 +129,9 @@ const LANGUAGES = {
     rust: {
         exts: ['.rs'],
         wasm: 'tree-sitter-rust.wasm',
-        // Bumped for the decorator-span fix — see the typescript entry above.
-        queryVersion: 2,
+        // Bumped for the decorator-span fix, then again for the
+        // full-signature fix — see the typescript entry above.
+        queryVersion: 3,
         importQueryVersion: 1,
         comment: { line: '//' },
         isExported(defNode) {
@@ -145,7 +152,9 @@ const LANGUAGES = {
     php: {
         exts: ['.php', '.phtml'],
         wasm: 'tree-sitter-php.wasm',
-        queryVersion: 1,
+        // Bumped for the full-signature fix — see the typescript entry
+        // above.
+        queryVersion: 2,
         importQueryVersion: 1,
         comment: { line: '//', blockOpen: '/*', blockClose: '*/' },
         // PHP's own visibility IS the export rule for a class member: no
@@ -452,15 +461,60 @@ function escapeRe(s) {
     return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-// One best-effort signature: the definition's own first source line. Not a
-// per-language formatter (that is JS-only in parse.js, where acorn gives
-// real parameter nodes) — just enough to show a caller what they are about
-// to read, e.g. `export class Circle implements Shape {` or
-// `pub fn new(radius: f64) -> Circle {`.
-const SIGNATURE_MAX = 160;
-function signatureOf(src, startIndex, endIndex) {
-    const first = src.slice(startIndex, endIndex).split('\n')[0].trim();
-    return first.length > SIGNATURE_MAX ? `${first.slice(0, SIGNATURE_MAX)}…` : first;
+// A full signature: the definition's text from its content start up to
+// where its BODY begins — not just the first source line, which cuts a
+// multi-line parameter list off mid-list (`export async function
+// createUser(`). Not a per-language formatter (that is JS-only in parse.js,
+// where acorn gives real parameter nodes) — generic across every
+// tree-sitter language here: most grammars expose the body as a named
+// field (`body:`), so that is tried first; `cfg.bodyTypes` is a small
+// per-language data fallback for the rare grammar that does not (checked on
+// the node itself, then one level into its children, so a wrapped
+// definition — TypeScript's arrow assigned to a `variable_declarator` — is
+// still found via the arrow function nested inside it).
+const SIGNATURE_MAX = 300;
+const DEFAULT_BODY_TYPES = ['statement_block', 'block', 'class_body', 'declaration_list', 'field_declaration_list', 'compound_statement'];
+
+function fieldBody(node) {
+    return typeof node.childForFieldName === 'function' ? node.childForFieldName('body') : null;
+}
+
+function findBodyStart(node, types) {
+    const own = fieldBody(node);
+    if (own) return own.startIndex;
+    for (let i = 0; i < node.childCount; i++) {
+        if (types.includes(node.child(i).type)) return node.child(i).startIndex;
+    }
+    // One level deeper, for a definition node that is itself a wrapper
+    // around the real function/class (TypeScript's `variable_declarator`
+    // around an `arrow_function`) — its own body lives on that child, not
+    // on this node.
+    for (let i = 0; i < node.childCount; i++) {
+        const child = node.child(i);
+        const nested = fieldBody(child);
+        if (nested) return nested.startIndex;
+        for (let j = 0; j < child.childCount; j++) {
+            if (types.includes(child.child(j).type)) return child.child(j).startIndex;
+        }
+    }
+    return null;
+}
+
+// No body found at all (an interface method signature, a bare declaration,
+// a type alias) → the whole node, up to `;`/its own end — never a silent
+// cut, so a signature that must be cut for length says so with `…`.
+function signatureOf(src, contentStart, node, cfg) {
+    const bodyStart = findBodyStart(node, (cfg && cfg.bodyTypes) || DEFAULT_BODY_TYPES);
+    const end = bodyStart != null ? bodyStart : node.endIndex;
+    let text = src
+        .slice(contentStart, end)
+        .replace(/\s+/g, ' ')
+        .trim()
+        // The body's own opener (`{` for a block, `:` for Python) is what
+        // stopped the slice above; trim it (and any space before it) so the
+        // signature ends cleanly on the parameter list/return type instead.
+        .replace(/\s*[{:]\s*$/, '');
+    return text.length > SIGNATURE_MAX ? `${text.slice(0, SIGNATURE_MAX)}…` : text;
 }
 
 // A decorator/attribute belongs to the symbol it decorates — `read('get_user')`
@@ -667,7 +721,7 @@ function buildSymbols(id, cfg, src, tree, query) {
         end: d.end,
         lineStart: lineOf(src, d.start),
         lineEnd: lineOf(src, d.end),
-        signature: signatureOf(src, d.contentStart, d.end),
+        signature: signatureOf(src, d.contentStart, d.node, cfg),
         doc: d.doc || '',
         ...(cfg.isExported(d.node, d.name, d.parent) ? { exported: true } : {}),
     }));

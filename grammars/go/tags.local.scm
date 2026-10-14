@@ -17,3 +17,24 @@
         (type_identifier) @parent
       ]))
   name: (field_identifier) @name) @definition.method
+
+; Package-level `const`/`var` — upstream's own tags.scm already HAS
+; `(var_declaration (var_spec name: (identifier) @name))` and the `const`
+; equivalent, but neither carries a `@definition.*` capture, so buildSymbols
+; (which only looks at `definition.`-prefixed captures) silently drops both;
+; they produced no symbol at all. `(source_file (var_declaration ...))`
+; restricts the match to a DIRECT child of the file's root — the same node
+; type is used for a LOCAL `var x = 1` inside a function body, which must
+; stay unaddressed, same rule every other language's "top-level only" bar
+; applies. A grouped `const ( A = 1; B = 2 )` is one `const_declaration`
+; with several `const_spec` children, each captured (and spanned)
+; independently, same as PHP's comma-separated `const_element`s.
+(source_file
+  (const_declaration
+    (const_spec
+      name: (identifier) @name) @definition.constant))
+
+(source_file
+  (var_declaration
+    (var_spec
+      name: (identifier) @name) @definition.constant))

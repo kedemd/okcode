@@ -218,6 +218,31 @@ for (const fac of facades()) {
             assert.equal(none.total, 0);
         });
 
+        it('a text-only miss with many mentions is capped, never a wall of every hit — same for an ambiguous symbol', async () => {
+            const { ws, writeDisk } = await setup();
+            // 11 files each mentioning the same non-symbol text, and 11 more
+            // each DEFINING a function of the same name — a real repo's
+            // common short name can hit both of these the same way.
+            for (let i = 0; i < 11; i++) writeDisk(`lib/mention-${i}.js`, `// ZEBRA_TOKEN_NOT_A_SYMBOL appears here\n`);
+            for (let i = 0; i < 11; i++)
+                writeDisk(`lib/dup-${i}.js`, `'use strict';\nfunction sharedName() { return ${i}; }\nmodule.exports = { sharedName };\n`);
+            await ws.sync();
+
+            const miss = await ws.read('ZEBRA_TOKEN_NOT_A_SYMBOL');
+            assert.ok(!miss.ok);
+            assert.equal(miss.mentionsTotal, 11, 'the TOTAL is always reported');
+            assert.equal(miss.mentions.length, 8, 'only a handful are LISTED');
+            assert.match(miss.reason, /11 places/);
+            assert.match(miss.reason, /showing 8 of 11/);
+            assert.match(miss.reason, /code_grep\("ZEBRA_TOKEN_NOT_A_SYMBOL"\)/, 'says how to get the rest');
+
+            const amb = await ws.read('sharedName');
+            assert.ok(!amb.ok && amb.ambiguous);
+            assert.equal(amb.candidates.length, 8, 'candidates are capped too');
+            assert.match(amb.reason, /11 files/);
+            assert.match(amb.reason, /showing 8 of 11/);
+        });
+
         it('outlines by symbol, and by chunk when a file has none', async () => {
             const { ws, writeDisk } = await setup();
             const out = await ws.outline('lib/math.js');

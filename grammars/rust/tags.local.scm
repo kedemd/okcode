@@ -16,3 +16,29 @@
   body: (declaration_list
     (function_item
       name: (identifier) @name) @definition.method))
+
+; Crate-root `const`/`static` — upstream has no idea either exists.
+; `(source_file (const_item ...))` restricts the match to a DIRECT child of
+; the file's root; Rust also allows a LOCAL `const`/`static` inside a
+; function body (same node types), which must stay unaddressed, same bar
+; every other language's top-level rule applies. An inline `mod foo { ... }`
+; is a module like a file is, so its direct `const`/`static` count too (and
+; nest under `foo` by containment); an `impl`'s associated consts are not
+; matched yet.
+(source_file
+  (const_item
+    name: (identifier) @name) @definition.constant)
+
+(source_file
+  (static_item
+    name: (identifier) @name) @definition.constant)
+
+(mod_item
+  body: (declaration_list
+    (const_item
+      name: (identifier) @name) @definition.constant))
+
+(mod_item
+  body: (declaration_list
+    (static_item
+      name: (identifier) @name) @definition.constant))

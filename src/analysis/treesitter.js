@@ -44,6 +44,14 @@ const path = require('path');
 const GRAMMAR_ROOT = path.join(__dirname, '..', '..', 'grammars');
 
 let manifest = null;
+// The grammar's own version, plus (for typescript) the vendored EXTRA
+// package's version (tree-sitter-javascript's tags.scm, layered in — see
+// queryTextFor) — folded in so bumping either one forces a reparse.
+function manifestVersion(man) {
+    if (!man) return '0';
+    return man.extra ? `${man.version}+${man.extra.package}@${man.extra.version}` : man.version;
+}
+
 function loadManifest() {
     if (manifest) return manifest;
     try {
@@ -69,8 +77,12 @@ const LANGUAGES = {
         // needs a reparse to pick up the wider span. Bumped again for the
         // full-signature fix (DESIGN §12): `signature` used to be just the
         // definition's first source line, truncating a multi-line parameter
-        // list.
-        queryVersion: 4,
+        // list. Bumped again (real-repo fixes, DESIGN §12): layered in
+        // tree-sitter-javascript's own tags.scm (call-site references, which
+        // were EMPTY for every TS/TSX file) and added top-level const/let/var
+        // symbols (manifestVersion() below folds that package's own version
+        // in too, so bumping IT also forces a reparse).
+        queryVersion: 5,
         importQueryVersion: 1,
         comment: { line: '//', blockOpen: '/*', blockClose: '*/' },
         // `export` wraps the declaration one level up (`export class C {}`
@@ -116,8 +128,11 @@ const LANGUAGES = {
         exts: ['.go'],
         wasm: 'tree-sitter-go.wasm',
         // Bumped for the full-signature fix — see the typescript entry
-        // above.
-        queryVersion: 3,
+        // above. Bumped again (real-repo fix, DESIGN §12): package-level
+        // `const`/`var` now produce symbols — upstream's own pattern for
+        // both had no `@definition.*` capture at all, so buildSymbols
+        // silently dropped them.
+        queryVersion: 4,
         importQueryVersion: 1,
         comment: { line: '//' },
         // Go's own export rule IS syntax: capitalised identifiers are
@@ -130,8 +145,10 @@ const LANGUAGES = {
         exts: ['.rs'],
         wasm: 'tree-sitter-rust.wasm',
         // Bumped for the decorator-span fix, then again for the
-        // full-signature fix — see the typescript entry above.
-        queryVersion: 4,
+        // full-signature fix — see the typescript entry above. Bumped again
+        // (real-repo fix, DESIGN §12): crate-root `const`/`static` now
+        // produce symbols — upstream had no pattern for either.
+        queryVersion: 6,
         importQueryVersion: 1,
         comment: { line: '//' },
         isExported(defNode) {
@@ -153,8 +170,12 @@ const LANGUAGES = {
         exts: ['.php', '.phtml'],
         wasm: 'tree-sitter-php.wasm',
         // Bumped for the full-signature fix — see the typescript entry
-        // above.
-        queryVersion: 3,
+        // above. Bumped again (real-repo fix, DESIGN §12): added
+        // `@reference.call` for a plain, unqualified function call
+        // (`helper(1)`) — upstream's own pattern only covers a namespaced
+        // or dynamic callee — and `define('FOO', 1)` now produces a
+        // `constant` symbol alongside the `const` keyword form.
+        queryVersion: 4,
         importQueryVersion: 1,
         comment: { line: '//', blockOpen: '/*', blockClose: '*/' },
         // PHP's own visibility IS the export rule for a class member: no
@@ -217,7 +238,12 @@ const LANGUAGES = {
     csharp: {
         exts: ['.cs'],
         wasm: 'tree-sitter-c_sharp.wasm',
-        queryVersion: 2,
+        // Bumped (real-repo fix, DESIGN §12): added `@reference.call` for
+        // a plain call and a member call — upstream had neither (its own
+        // member-access match uses the `send` kind, which this project's
+        // storage layer never persists) — and a `const` field now produces
+        // a symbol, same role Java's `static final` field already has.
+        queryVersion: 3,
         importQueryVersion: 1,
         comment: { line: '//', blockOpen: '/*', blockClose: '*/' },
         // Same "explicit `public` or nothing" rule as Java above; C#'s
@@ -250,7 +276,10 @@ const LANGUAGES = {
     c: {
         exts: ['.c'],
         wasm: 'tree-sitter-c.wasm',
-        queryVersion: 2,
+        // Bumped (real-repo fix, DESIGN §12): added `@reference.call` for
+        // a plain call and a struct-member call — upstream had neither —
+        // and a file-scope global variable now produces a symbol.
+        queryVersion: 5,
         importQueryVersion: 1,
         comment: { line: '//', blockOpen: '/*', blockClose: '*/' },
         // Unlike every other language here, this grammar's own
@@ -284,7 +313,11 @@ const LANGUAGES = {
         // templates) under the C grammar is a wall of syntax errors.
         exts: ['.cpp', '.cc', '.cxx', '.h', '.hpp', '.hh', '.hxx', '.ipp'],
         wasm: 'tree-sitter-cpp.wasm',
-        queryVersion: 2,
+        // Bumped (real-repo fix, DESIGN §12): added `@reference.call` for
+        // a plain call, a member call and a namespace-qualified call —
+        // upstream had none of the three — and a file-scope global
+        // variable (incl. `constexpr`) now produces a symbol.
+        queryVersion: 6,
         importQueryVersion: 1,
         comment: { line: '//', blockOpen: '/*', blockClose: '*/' },
         // Same declarator/definition split as C above — see that entry's
@@ -384,21 +417,30 @@ async function ensureParserInit() {
     return initPromise;
 }
 
-// Combined query text for a language: upstream's tags.scm, then the local
-// override — later patterns are not given priority BY the query engine
-// (every pattern just matches independently); the override's effect comes
-// entirely from the merge-by-range step in buildSymbols(), not from file
-// order here.
+// Combined query text for a language: upstream's tags.scm, an optional
+// extra upstream query vendored from ANOTHER grammar package (TypeScript's
+// own tags.scm is written to be layered on tree-sitter-javascript's —
+// `grammars/typescript/tags.upstream-js.scm`, see vendor-grammars.js), then
+// the local override — later patterns are not given priority BY the query
+// engine (every pattern just matches independently); the override's effect
+// comes entirely from the merge-by-range step in buildSymbols(), not from
+// file order here.
 function queryTextFor(id) {
     const dir = path.join(GRAMMAR_ROOT, id);
     const upstream = fs.readFileSync(path.join(dir, 'tags.scm'), 'utf8');
+    let extra = '';
+    try {
+        extra = fs.readFileSync(path.join(dir, 'tags.upstream-js.scm'), 'utf8');
+    } catch {
+        /* no extra upstream query vendored for this language */
+    }
     let local = '';
     try {
         local = fs.readFileSync(path.join(dir, 'tags.local.scm'), 'utf8');
     } catch {
         /* no override for this language */
     }
-    return `${upstream}\n${local}`;
+    return `${upstream}\n${extra}\n${local}`;
 }
 
 // F3's import/export query, per language (grammars/<lang>/imports.scm) —
@@ -441,7 +483,7 @@ async function ensureLanguage(id) {
             // the same way the tags query's does.
             const importQueryText = importQueryTextFor(id);
             const importQuery = importQueryText ? new wts.Query(language, importQueryText) : null;
-            const version = `${(man && man.version) || '0'}:q${cfg.queryVersion}.${cfg.importQueryVersion || 0}`;
+            const version = `${manifestVersion(man)}:q${cfg.queryVersion}.${cfg.importQueryVersion || 0}`;
             let tsxParser = null;
             let tsxQuery = null;
             let tsxImportQuery = null;
@@ -1045,7 +1087,7 @@ function currentVersionFor(p) {
     // in the version keeps that row from re-staling on every scan, and makes
     // installing the runtime later reparse it.
     const none = requireRuntimeOnce() ? '' : ':none';
-    return `${(man && man.version) || '0'}:q${cfg.queryVersion}.${cfg.importQueryVersion || 0}${none}`;
+    return `${manifestVersion(man)}:q${cfg.queryVersion}.${cfg.importQueryVersion || 0}${none}`;
 }
 
 module.exports = {

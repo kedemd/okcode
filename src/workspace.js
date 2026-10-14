@@ -94,6 +94,24 @@ const NONE_TEXT_MAX = 32 * 1024 * 1024;
 // a partition: everything stays reachable by explicit range regardless.
 const MIN_PIECE_LINES = 3;
 
+// How many hits an unbounded-list error/hint string shows inline before it
+// says "N more" and names the tool to get the rest — never silent about the
+// total, never a wall of every hit either (a common short name can appear
+// ~150 times across a real repo).
+const MENTIONS_REASON_CAP = 8;
+
+// `list.slice(0, cap)` plus the one clause every truncated list here needs
+// appended to its reason string: how many were left out, total included —
+// never a silent cut, and never one line listing every one of ~150 hits
+// either. `more` is `''` when nothing was cut, so it is always safe to
+// splice straight into a reason string.
+function cappedList(items, { cap = MENTIONS_REASON_CAP, moreHint = null } = {}) {
+    const shown = items.slice(0, cap);
+    const rest = items.length - shown.length;
+    const more = rest > 0 ? ` (showing ${shown.length} of ${items.length}${moreHint ? `; ${moreHint}` : ''})` : '';
+    return { shown, total: items.length, rest, more };
+}
+
 const sha1 = (buf) => crypto.createHash('sha1').update(buf).digest('hex').toUpperCase();
 
 // okcode's own transient files never become part of the graph.
@@ -1324,11 +1342,12 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
                 };
             }
             if (hits.length > 1) {
+                const { shown, more } = cappedList(hits);
                 return {
                     ok: false,
                     ambiguous: true,
-                    reason: `"${symbol}" is defined in ${hits.length} places in ${rel} — read one by range`,
-                    candidates: hits.map((h) => `${rel}:${h.lineStart}-${h.lineEnd}`),
+                    reason: `"${symbol}" is defined in ${hits.length} places in ${rel}${more} — read one by range`,
+                    candidates: shown.map((h) => `${rel}:${h.lineStart}-${h.lineEnd}`),
                 };
             }
             const h = hits[0];
@@ -1387,11 +1406,12 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
         const sec = sectionOf(rel, text, title);
         if (!sec) return null;
         if (sec.ambiguous) {
+            const { shown, more } = cappedList(sec.ambiguous);
             return {
                 ok: false,
                 ambiguous: true,
-                reason: `"${title}" heads ${sec.ambiguous.length} sections in ${rel} — read one by range`,
-                candidates: sec.ambiguous.map((g) => `${rel}:${g.lineStart}-${g.lineEnd}`),
+                reason: `"${title}" heads ${sec.ambiguous.length} sections in ${rel}${more} — read one by range`,
+                candidates: shown.map((g) => `${rel}:${g.lineStart}-${g.lineEnd}`),
             };
         }
         const lines = text.split('\n');
@@ -1891,24 +1911,34 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
                     candidates: near.length ? near : kin,
                 };
             }
-            const mentions = await mentionsOf(nameHint, 3);
+            const mentions = await mentionsOf(nameHint);
+            // Never dump every hit into one line — a common short name can
+            // appear ~150 times across a real repo, which used to land in
+            // the reason string whole. Cap what is SHOWN; always say the
+            // TOTAL, and how to get the rest (never silent about either).
+            const { shown, total, more } = cappedList(mentions, { moreHint: `code_grep("${nameHint}") for the rest` });
             return {
                 ok: false,
                 reason:
                     `no symbol named "${nameHint}"${fileHint ? ` in ${fileHint}` : ''}` +
                     (mentions.length
-                        ? ` — but the text appears in ${mentions.map((m) => `${m.rel}:${m.line}`).join(', ')}; read the file, or use find() for what contains it`
+                        ? ` — but the text appears in ${total} place${total === 1 ? '' : 's'}: ${shown.map((m) => `${m.rel}:${m.line}`).join(', ')}${more}; read the file, or use find() for what contains it`
                         : ' — nothing in the workspace mentions it either; check the spelling or use ask()'),
-                mentions,
+                mentions: shown,
+                mentionsTotal: total,
             };
         }
         if (hits.length > 1) {
             const where = new Set(hits.map((h) => h.file.rel)).size > 1 ? 'files' : 'places';
+            // A common name (`render`, `init`) can be defined dozens of times
+            // across a real repo — cap what is listed, same as the no-hit
+            // miss above, never silent about the total.
+            const { shown, more } = cappedList(hits);
             return {
                 ok: false,
                 ambiguous: true,
-                reason: `"${nameHint}" is defined in ${hits.length} ${where} — qualify it as <file>#<path>`,
-                candidates: hits.map((h) => `${h.file.rel}#${h.symbol.path || h.symbol.name}`),
+                reason: `"${nameHint}" is defined in ${hits.length} ${where}${more} — qualify it as <file>#<path>`,
+                candidates: shown.map((h) => `${h.file.rel}#${h.symbol.path || h.symbol.name}`),
             };
         }
         return { ok: true, ...hits[0] };
@@ -1998,11 +2028,12 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
         const hits = bySuffix.length ? bySuffix : syms.filter((s) => s.name === nameHint);
         if (!hits.length) return { ok: false, reason: `no symbol named "${nameHint}" in ${snapshot.rel}` };
         if (hits.length > 1) {
+            const { shown, more } = cappedList(hits);
             return {
                 ok: false,
                 ambiguous: true,
-                reason: `"${nameHint}" is defined in ${hits.length} places in ${snapshot.rel} — qualify it as <parent>.<name>`,
-                candidates: hits.map((s) => s.path || s.name),
+                reason: `"${nameHint}" is defined in ${hits.length} places in ${snapshot.rel}${more} — qualify it as <parent>.<name>`,
+                candidates: shown.map((s) => s.path || s.name),
             };
         }
         return { ok: true, symbol: hits[0] };

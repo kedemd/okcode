@@ -599,3 +599,122 @@ test('.h: parsed with the C++ grammar — a C++ header keeps its classes and ful
     const c = extract('util.h', '#define MAX 3\nint add(int a, int b);\n');
     assert.deepEqual(c.symbols.map((s) => s.name).sort(), ['MAX', 'add']);
 });
+
+// ── real-repo fixes: call sites, top-level consts (DESIGN §12) ─────────────
+// Running okcode on a 435-file Next.js/TypeScript app and a Python package
+// found these empty/missing where fixture tests never looked.
+
+const CALL_SRC = 'function f(){ helper(1); o.m(2); }';
+
+test('call sites: helper(1); o.m(2) — TypeScript, TSX, C#, C, C++, PHP', () => {
+    const ts = extract('call.ts', CALL_SRC);
+    assert.deepEqual(
+        ts.references.filter((r) => r.kind === 'call').map((r) => r.name).sort(),
+        ['helper', 'm'],
+    );
+    const tsx = extract('call.tsx', `function f(){ helper(1); o.m(2); return <div/>; }`);
+    assert.deepEqual(
+        tsx.references.filter((r) => r.kind === 'call').map((r) => r.name).sort(),
+        ['helper', 'm'],
+    );
+    const cs = extract('call.cs', `class C { void f(){ helper(1); o.m(2); } }`);
+    assert.deepEqual(
+        cs.references.filter((r) => r.kind === 'call').map((r) => r.name).sort(),
+        ['helper', 'm'],
+    );
+    const c = extract('call.c', `void f(){ helper(1); o.m(2); }`);
+    assert.deepEqual(
+        c.references.filter((r) => r.kind === 'call').map((r) => r.name).sort(),
+        ['helper', 'm'],
+    );
+    const cpp = extract('call.cpp', `void f(){ helper(1); o.m(2); ns::q(3); }`);
+    assert.deepEqual(
+        cpp.references.filter((r) => r.kind === 'call').map((r) => r.name).sort(),
+        ['helper', 'm', 'q'],
+    );
+    const php = extract('call.php', `<?php function f(){ helper(1); $o->m(2); } ?>`);
+    assert.deepEqual(
+        php.references.filter((r) => r.kind === 'call').map((r) => r.name).sort(),
+        ['helper', 'm'],
+    );
+});
+
+test('top-level const/let/var becomes a symbol — TypeScript (incl. a call-built component)', () => {
+    const src = [
+        'export const CHART_COLORS = { a: 1 };',
+        'export const label = "x";',
+        'const config = { a: 1 };',
+        'export default config;',
+        'const Card = forwardRef((p, ref) => null);',
+        'const Card2 = memo(() => null);',
+        'function f(){ const local = 1; return local; }',
+    ].join('\n');
+    const r = extract('consts.ts', src);
+    const byName = new Map(r.symbols.map((s) => [s.name, s]));
+    assert.equal(byName.get('CHART_COLORS').kind, 'constant');
+    assert.ok(byName.get('CHART_COLORS').exported);
+    assert.equal(byName.get('label').kind, 'constant');
+    assert.equal(byName.get('config').kind, 'constant');
+    assert.equal(byName.get('Card').kind, 'constant', 'forwardRef(...) component gets a symbol');
+    assert.equal(byName.get('Card2').kind, 'constant', 'memo(...) component gets a symbol');
+    assert.ok(!byName.has('local'), 'a local const inside a scope stays unaddressed');
+});
+
+test('top-level const/var becomes a symbol — Go (incl. a grouped const block), Rust, C, C++, PHP define(), C# const field', () => {
+    const go = extract('consts.go', [
+        'package main',
+        'const Foo = 1',
+        'const (',
+        '  A = 1',
+        '  b = 2',
+        ')',
+        'var Bar = "x"',
+        'func f() { var x = 1; _ = x }',
+    ].join('\n'));
+    const goNames = new Map(go.symbols.map((s) => [s.name, s]));
+    assert.equal(goNames.get('Foo').kind, 'constant');
+    assert.ok(goNames.get('Foo').exported);
+    assert.equal(goNames.get('A').kind, 'constant');
+    assert.ok(!goNames.get('b').exported, 'lowercase is not package-exported');
+    assert.equal(goNames.get('Bar').kind, 'constant');
+    assert.ok(!goNames.has('x'), 'a local var inside a function stays unaddressed');
+
+    const rust = extract('consts.rs', 'const FOO: i32 = 1;\nstatic BAR: i32 = 2;\nfn f(){ let x = 1; }\n');
+    const rustNames = new Set(rust.symbols.map((s) => s.name));
+    assert.ok(rustNames.has('FOO') && rustNames.has('BAR'));
+    assert.ok(!rustNames.has('x'));
+
+    const c = extract('consts.c', 'int counter = 0;\nstatic int hidden = 1;\nvoid f(){ int local = 1; }\n');
+    const cByName = new Map(c.symbols.map((s) => [s.name, s]));
+    assert.equal(cByName.get('counter').kind, 'constant');
+    assert.ok(cByName.get('counter').exported);
+    assert.ok(!cByName.get('hidden').exported, 'static at file scope is not exported');
+    assert.ok(!cByName.has('local'));
+
+    const cpp = extract('consts.cpp', 'int counter = 0;\nconstexpr int MAX = 10;\n');
+    const cppNames = new Set(cpp.symbols.map((s) => s.name));
+    assert.ok(cppNames.has('counter') && cppNames.has('MAX'));
+
+    const php = extract('consts.php', `<?php\nconst FOO = 1;\ndefine('BAR', 2);\n?>`);
+    const phpNames = new Map(php.symbols.map((s) => [s.name, s]));
+    assert.equal(phpNames.get('FOO').kind, 'constant');
+    assert.equal(phpNames.get('BAR').kind, 'constant');
+
+    const cs = extract('consts.cs', `class C { public int x = 1; const int W = 3; private static readonly int Y = 2; }`);
+    const csNames = new Map(cs.symbols.map((s) => [s.name, s]));
+    assert.equal(csNames.get('W').kind, 'constant');
+    assert.ok(!csNames.has('x'), 'a plain field stays unindexed');
+    assert.ok(!csNames.has('Y'), 'static readonly is not the `const` keyword this override targets');
+});
+
+test('globals inside a namespace / inline mod, and pointer globals, are symbols; locals are not', () => {
+    const cpp = extract('a.cpp', 'namespace app {\nconstexpr int kMax = 3;\nconst char* name = "x";\nvoid f() { int local = 1; }\n}\nint *p;\n');
+    assert.deepEqual(
+        cpp.symbols.filter((s) => s.kind === 'constant').map((s) => s.path).sort(),
+        ['app.kMax', 'app.name', 'p'],
+    );
+    const c = extract('a.c', 'static const char *top = "y";\nint *p;\nvoid f(void) { char *local = 0; }\n');
+    assert.deepEqual(c.symbols.filter((s) => s.kind === 'constant').map((s) => s.path).sort(), ['p', 'top']);
+    const rs = extract('a.rs', 'mod cfg {\n    pub const MAX: usize = 3;\n    static NAME: &str = "x";\n    fn f() { const LOCAL: u8 = 2; }\n}\n');
+    assert.deepEqual(rs.symbols.filter((s) => s.kind === 'constant').map((s) => s.path).sort(), ['cfg.MAX', 'cfg.NAME']);
+});

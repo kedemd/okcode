@@ -67,6 +67,8 @@ const LANGS = {
     '.py': 'python',
     '.go': 'go',
     '.rs': 'rust',
+    '.php': 'php',
+    '.phtml': 'php',
     '.json': 'json',
     '.jsonc': 'json',
     '.md': 'markdown',
@@ -743,7 +745,7 @@ registerExtractor('javascript', extractJavaScript);
 // above and reproduces EXACTLY the "no extractor" message the generic path
 // gives a language with nothing registered at all — grammars missing must
 // look identical to grammars never having been written.
-for (const id of ['typescript', 'python', 'go', 'rust']) {
+for (const id of ['typescript', 'python', 'go', 'rust', 'php']) {
     registerExtractor(id, (p, src) => {
         const result = treesitter.extractFor(id, p, src);
         if (!result) throw new Error(`${id} — searchable, no symbol extractor yet`);

@@ -138,7 +138,7 @@ function effectiveCompilerOptions(dir, parsed, tsconfigs) {
 
 // ── workspace-wide config, parsed once per generation ───────────────────
 
-const CONFIG_BASENAMES = new Set(['tsconfig.json', 'go.mod', 'Cargo.toml', 'pyproject.toml', 'setup.py']);
+const CONFIG_BASENAMES = new Set(['tsconfig.json', 'go.mod', 'Cargo.toml', 'pyproject.toml', 'setup.py', 'composer.json']);
 
 // Minimal TOML reads — just the one key each format needs. A real TOML/
 // go.mod parser is not worth a dependency for "the first `module` line" /
@@ -149,6 +149,32 @@ function goModuleName(text) {
 }
 function hasProjectTable(text) {
     return /^\s*\[(project|tool\.poetry|build-system)\]/m.test(String(text || ''));
+}
+
+// composer.json IS plain JSON (unlike go.mod/Cargo.toml/pyproject.toml) —
+// just `autoload.psr-4`, the one table PHP resolution needs: NAMESPACE
+// PREFIX -> one directory or several, relative to this composer.json's
+// own folder. `autoload-dev` (test-only autoloading) is deliberately not
+// read here — the same "only what resolution needs" scope every other
+// config reader above keeps.
+function psr4RootsFrom(dir, body) {
+    const out = [];
+    let json;
+    try {
+        json = JSON.parse(body);
+    } catch {
+        return out; // malformed composer.json — no PSR-4 roots from it, not a crash
+    }
+    const psr4 = (json && json.autoload && json.autoload['psr-4']) || {};
+    for (const [prefix, target] of Object.entries(psr4)) {
+        const normPrefix = prefix.endsWith('\\') ? prefix : `${prefix}\\`;
+        for (const t of Array.isArray(target) ? target : [target]) {
+            if (typeof t !== 'string') continue;
+            const targetDir = normJoin(dir, t).replace(/\/$/, '');
+            out.push({ prefix: normPrefix, dir: targetDir });
+        }
+    }
+    return out;
 }
 
 async function readConfigs(filesList, access) {
@@ -169,6 +195,7 @@ async function readConfigs(filesList, access) {
     const tsconfigs = new Map(); // dir -> { raw, options, path }
     const goModules = []; // { dir, name } — dir is the module root
     const pyRoots = new Set(); // directories treated as import roots
+    const phpRoots = []; // { prefix, dir } — PSR-4 namespace prefix -> directory
     for (const [rel, body] of text) {
         const dir = pathPosix.dirname(rel) === '.' ? '' : pathPosix.dirname(rel);
         const base = pathPosix.basename(rel);
@@ -182,6 +209,8 @@ async function readConfigs(filesList, access) {
             pyRoots.add(dir);
             const src = `${dir ? `${dir}/` : ''}src`;
             if (filesList.some((f) => f.rel.startsWith(`${src}/`))) pyRoots.add(src);
+        } else if (base === 'composer.json') {
+            phpRoots.push(...psr4RootsFrom(dir, body));
         }
     }
     // Resolve each tsconfig's `compilerOptions` (with its own one-hop
@@ -202,7 +231,10 @@ async function readConfigs(filesList, access) {
         pyRoots.add(parent);
     }
     pyRoots.add('');
-    return { tsconfigs, goModules, pyRoots: [...pyRoots] };
+    // Longest prefix first (see resolvePhpFqn's "most specific root" rule) —
+    // sorted once here rather than on every resolveFile call.
+    phpRoots.sort((a, b) => b.prefix.length - a.prefix.length);
+    return { tsconfigs, goModules, pyRoots: [...pyRoots], phpRoots };
 }
 
 // ── TypeScript: baseUrl / paths ─────────────────────────────────────────
@@ -429,6 +461,42 @@ function resolveRustPath(fromFile, text, tree) {
     return null;
 }
 
+// ── PHP ──────────────────────────────────────────────────────────────────
+
+// PSR-4 (Composer's autoloading standard, `composer.json`'s
+// `autoload.psr-4`): a NAMESPACE PREFIX — always matched WITH its trailing
+// `\`, so `App\` does not also claim `AppFoo\` — maps to a DIRECTORY,
+// relative to that composer.json's own folder. Longest prefix wins, the
+// same "most specific root" rule Go's module-path matching already uses
+// above; a bare class with no `use`d namespace at all, or one under no
+// configured prefix, is left unresolved — not every PHP class lives under
+// Composer's autoloader (a plain `require`-only project has none at all).
+function resolvePhpFqn(fqn, psr4Roots, index) {
+    let best = null;
+    for (const r of psr4Roots) {
+        if (fqn === r.prefix.slice(0, -1) || fqn.startsWith(r.prefix)) {
+            if (!best || r.prefix.length > best.prefix.length) best = r;
+        }
+    }
+    if (!best) return null;
+    const rest = fqn.slice(best.prefix.length);
+    if (!rest) return null; // the FQN *is* the bare prefix — no class name to resolve
+    const relPath = rest.split('\\').filter(Boolean).join('/');
+    const candidate = best.dir ? `${best.dir}/${relPath}.php` : `${relPath}.php`;
+    return index.has(candidate) ? candidate : null;
+}
+
+// `require`/`include` of a literal string path resolves relative to the
+// INCLUDING file's own directory — PHP's own default (there is no
+// "index file" convention here, unlike JS) — with `.php` appended when
+// the literal omits it (`require 'config'`, legal but unusual).
+function resolvePhpRequire(fromFile, spec, index) {
+    const norm = normJoin(pathPosix.dirname(fromFile), spec);
+    if (index.has(norm)) return norm;
+    if (!norm.endsWith('.php') && index.has(`${norm}.php`)) return `${norm}.php`;
+    return null;
+}
+
 // ── per-file resolution ─────────────────────────────────────────────────
 
 function resolveFile(f, index, byRel, configs, rustTrees) {
@@ -496,6 +564,21 @@ function resolveFile(f, index, byRel, configs, rustTrees) {
             if (tree) {
                 const r = resolveRustPath(f.rel, from, tree);
                 if (r) push(r.to, r.name);
+            }
+            continue;
+        }
+        if (lang === 'php') {
+            if (imp.kind === 'require') {
+                push(resolvePhpRequire(f.rel, from, index), null);
+            } else {
+                // `imp.kind === 'import'` (a `use` statement): one push per
+                // name — a grouped `use A\{B, C}` already carries both in
+                // `imp.names` (grammars/php/imports.scm), same shape a
+                // multi-name Python `from X import a, b` already has.
+                for (const { imported } of imp.names || []) {
+                    const fqn = imported ? `${from ? `${from}\\` : ''}${imported}` : from;
+                    push(resolvePhpFqn(fqn, configs.phpRoots, index), imported);
+                }
             }
             continue;
         }

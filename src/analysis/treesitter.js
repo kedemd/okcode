@@ -63,7 +63,11 @@ const LANGUAGES = {
         tsxExts: ['.tsx'],
         wasm: 'tree-sitter-typescript.wasm',
         tsxWasm: 'tree-sitter-tsx.wasm',
-        queryVersion: 1,
+        // Bumped for the decorator-span fix (DESIGN §12): a decorated
+        // class/method/property's stored span used to start at the class/
+        // method/property itself, not its `@decorator`(s) — every row
+        // needs a reparse to pick up the wider span.
+        queryVersion: 2,
         importQueryVersion: 1,
         comment: { line: '//', blockOpen: '/*', blockClose: '*/' },
         // `export` wraps the declaration one level up (`export class C {}`
@@ -74,11 +78,18 @@ const LANGUAGES = {
         isExported(defNode) {
             return hasAncestorType(defNode, 'export_statement', 2);
         },
+        // A class's own `@decorator`(s) are already children of
+        // `class_declaration` (the grammar parses them INTO the class
+        // node), so its span is already right without this; a method's or
+        // property's `@decorator`(s) are PRECEDING SIBLINGS inside
+        // `class_body` instead — those need the span extended backward.
+        decorators: { siblingTypes: ['decorator'] },
     },
     python: {
         exts: ['.py'],
         wasm: 'tree-sitter-python.wasm',
-        queryVersion: 1,
+        // Bumped for the decorator-span fix — see the typescript entry above.
+        queryVersion: 2,
         importQueryVersion: 1,
         comment: { line: '#' },
         // PEP 8 convention, not syntax: a single leading underscore means
@@ -89,6 +100,13 @@ const LANGUAGES = {
         isExported(_defNode, name, parent) {
             return !parent && typeof name === 'string' && name.length > 0 && !name.startsWith('_');
         },
+        // `@app.route(...)` / `@login_required` above a `def`/`class` parse
+        // as sibling `decorator` nodes under a `decorated_definition`
+        // wrapper, with the `function_definition`/`class_definition` as
+        // its LAST child — the query still captures the inner node (that
+        // is what upstream's/local's patterns target), so the real span is
+        // the WRAPPER's.
+        decorators: { wrapperTypes: ['decorated_definition'] },
     },
     go: {
         exts: ['.go'],
@@ -105,7 +123,8 @@ const LANGUAGES = {
     rust: {
         exts: ['.rs'],
         wasm: 'tree-sitter-rust.wasm',
-        queryVersion: 1,
+        // Bumped for the decorator-span fix — see the typescript entry above.
+        queryVersion: 2,
         importQueryVersion: 1,
         comment: { line: '//' },
         isExported(defNode) {
@@ -117,6 +136,40 @@ const LANGUAGES = {
             }
             return false;
         },
+        // `#[derive(Debug)]` / `#[test]` are PRECEDING SIBLINGS of the
+        // item they decorate (`attribute_item` nodes in the same
+        // `source_file`/`declaration_list`), never a wrapper — unlike
+        // Python's `decorated_definition`.
+        decorators: { siblingTypes: ['attribute_item'] },
+    },
+    php: {
+        exts: ['.php', '.phtml'],
+        wasm: 'tree-sitter-php.wasm',
+        queryVersion: 1,
+        importQueryVersion: 1,
+        comment: { line: '//', blockOpen: '/*', blockClose: '*/' },
+        // PHP's own visibility IS the export rule for a class member: no
+        // modifier at all defaults to public, same as an explicit one;
+        // only `private`/`protected` hide it. A namespace-level symbol
+        // (no parent — function/class/interface/trait/enum/constant) has
+        // no visibility concept to hide behind at all, the same reason Go's
+        // capitalisation convention and Rust's `pub` check both only apply
+        // where there IS a modifier to look for.
+        isExported(defNode, _name, parent) {
+            if (!parent) return true;
+            for (let i = 0; i < defNode.childCount; i++) {
+                const c = defNode.child(i);
+                if (c.type === 'visibility_modifier') return c.text === 'public';
+            }
+            return true;
+        },
+        // `#[Route(...)]` is a FIELD of the class/method/function node
+        // itself (`attributes:`), not a sibling or a wrapper — the
+        // grammar already parses it INTO the node, so `node.startIndex`
+        // sits at the `#[` with nothing to extend. What needs adjusting
+        // instead is the SIGNATURE, which must skip the leading
+        // `attribute_list` to find where the def itself actually starts.
+        decorators: { leadingChildTypes: ['attribute_list'] },
     },
 };
 
@@ -410,6 +463,58 @@ function signatureOf(src, startIndex, endIndex) {
     return first.length > SIGNATURE_MAX ? `${first.slice(0, SIGNATURE_MAX)}…` : first;
 }
 
+// A decorator/attribute belongs to the symbol it decorates — `read('get_user')`
+// on a Python `@app.route(...)` handler should show the route, and an edit
+// by symbol name must be able to touch (or must include, when replacing the
+// body) the decorator, not just the bare `def`. Three shapes cover every
+// language here, all DATA in `cfg.decorators` (see the LANGUAGES table),
+// never per-language code:
+//   - `wrapperTypes`: the query's own captured node is nested one level
+//     under a wrapper whose span is the REAL one (Python's
+//     `decorated_definition`, decorator(s) then `function_definition`/
+//     `class_definition` as its last child) — climb to the parent.
+//   - `siblingTypes`: the decorator(s) are PRECEDING SIBLINGS of the
+//     captured node, not an ancestor (TypeScript's `decorator` before a
+//     `method_definition`/`public_field_definition` in a `class_body`;
+//     Rust's `attribute_item` before a `function_item`/`struct_item` in a
+//     `source_file`/`declaration_list`) — walk backward while the
+//     immediately preceding sibling matches.
+//   - `leadingChildTypes`: the decorator is already INSIDE the captured
+//     node's own span (PHP's `attribute_list` is a field of the
+//     class/method/function node itself, so `node.startIndex` already
+//     sits at the `#[` — nothing to extend), but the SIGNATURE (the def's
+//     own first line) must skip past it; this says which leading child(ren)
+//     to skip to find where the def itself actually starts.
+// A node can combine `siblingTypes`/`wrapperTypes` (adjust `start`) with
+// `leadingChildTypes` (adjust `contentStart`, used only for the signature);
+// in practice no language needs both today, but nothing here assumes
+// otherwise.
+function decoratedSpan(node, dec) {
+    let start = node.startIndex;
+    let contentStart = node.startIndex;
+    if (!dec) return { start, contentStart };
+    if (dec.wrapperTypes && node.parent && dec.wrapperTypes.includes(node.parent.type)) {
+        start = node.parent.startIndex;
+    }
+    if (dec.siblingTypes) {
+        let prev = node.previousSibling;
+        while (prev && dec.siblingTypes.includes(prev.type)) {
+            start = prev.startIndex;
+            prev = prev.previousSibling;
+        }
+    }
+    if (dec.leadingChildTypes) {
+        let i = 0;
+        let child = node.child(0);
+        while (child && dec.leadingChildTypes.includes(child.type)) {
+            i++;
+            child = node.child(i);
+        }
+        if (child) contentStart = child.startIndex;
+    }
+    return { start, contentStart };
+}
+
 // tree-sitter marks a syntax error as either an ERROR node (unexpected
 // input) or a MISSING node (expected input that never arrived) — both are
 // walked here once per parse. Used by both buildSymbols (to report
@@ -498,15 +603,19 @@ function buildSymbols(id, cfg, src, tree, query) {
         if (!existing.doc && d.doc) existing.doc = d.doc;
         if (!existing.parent && d.parent) existing.parent = d.parent;
     }
-    const defs = [...byRange.values()].map((d) => ({
-        name: d.name,
-        kind: d.kind,
-        start: d.node.startIndex,
-        end: d.node.endIndex,
-        explicitParent: d.parent,
-        doc: d.doc,
-        node: d.node,
-    }));
+    const defs = [...byRange.values()].map((d) => {
+        const { start, contentStart } = decoratedSpan(d.node, cfg.decorators);
+        return {
+            name: d.name,
+            kind: d.kind,
+            start,
+            contentStart,
+            end: d.node.endIndex,
+            explicitParent: d.parent,
+            doc: d.doc,
+            node: d.node,
+        };
+    });
 
     // Nesting: an explicit @parent capture (Go's receiver, Rust's impl type)
     // wins outright. Otherwise the smallest OTHER definition whose range
@@ -558,7 +667,7 @@ function buildSymbols(id, cfg, src, tree, query) {
         end: d.end,
         lineStart: lineOf(src, d.start),
         lineEnd: lineOf(src, d.end),
-        signature: signatureOf(src, d.start, d.end),
+        signature: signatureOf(src, d.contentStart, d.end),
         doc: d.doc || '',
         ...(cfg.isExported(d.node, d.name, d.parent) ? { exported: true } : {}),
     }));

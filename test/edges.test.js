@@ -196,4 +196,44 @@ describe('F3 resolved edges + F4.3 okjs component usage', () => {
         const after2 = await ws.importers('a.js');
         assert.equal(after2.importers.length, 2, JSON.stringify(after2));
     });
+
+    it('PHP: a `use` statement resolves via composer.json PSR-4, and a relative `require` resolves by path', async () => {
+        const { ws } = await setup({
+            'composer.json': JSON.stringify({ autoload: { 'psr-4': { 'App\\': 'src/' } } }),
+            'src/Services/Mailer.php': '<?php\nnamespace App\\Services;\n\nclass Mailer {\n    public function send() {\n        return 1;\n    }\n}\n',
+            'src/boot.php': '<?php\n// bootstraps the app\n',
+            'src/Controller.php':
+                "<?php\nnamespace App;\n\nuse App\\Services\\Mailer;\n\nrequire_once './boot.php';\n\nclass Controller {\n    public function run() {\n        \$m = new Mailer();\n        return \$m->send();\n    }\n}\n",
+        });
+        await treesitter.ensureLanguage('php');
+        await ws.sync();
+        const r = await ws.importers('src/Services/Mailer.php');
+        assert.ok(r.ok, JSON.stringify(r));
+        assert.deepEqual(
+            r.importers.map((i) => i.file),
+            ['src/Controller.php'],
+        );
+        const boot = await ws.importers('src/boot.php');
+        assert.ok(boot.ok);
+        assert.deepEqual(
+            boot.importers.map((i) => i.file),
+            ['src/Controller.php'],
+        );
+        const hits = await ws.refs('Mailer');
+        assert.ok(hits.some((h) => h.file === 'src/Controller.php' && h.label === 'imported'));
+    });
+
+    it('PHP: a grouped `use A\\{B, C as D}` resolves both names, and an unresolvable namespace stays unresolved', async () => {
+        const { ws } = await setup({
+            'composer.json': JSON.stringify({ autoload: { 'psr-4': { 'App\\': 'src/' } } }),
+            'src/Services/Mailer.php': '<?php\nnamespace App\\Services;\n\nclass Mailer {}\n',
+            'src/Services/Logger.php': '<?php\nnamespace App\\Services;\n\nclass Logger {}\n',
+            'src/Controller.php':
+                '<?php\nnamespace App;\n\nuse App\\Services\\{Mailer, Logger as Log};\nuse Some\\Unconfigured\\Thing;\n\nclass Controller {}\n',
+        });
+        await treesitter.ensureLanguage('php');
+        await ws.sync();
+        assert.deepEqual((await ws.importers('src/Services/Mailer.php')).importers.map((i) => i.file), ['src/Controller.php']);
+        assert.deepEqual((await ws.importers('src/Services/Logger.php')).importers.map((i) => i.file), ['src/Controller.php']);
+    });
 });

@@ -132,8 +132,46 @@ const RUST = [
 
 const RUST_BROKEN = ['fn broken(a: i32, b: i32) -> i32 {', '    a +', '}', ''].join('\n');
 
+const PHP = [
+    '<?php',
+    'namespace App\\Models;',
+    '',
+    'const VERSION = 1;',
+    '',
+    '/** The user model. */',
+    'class User {',
+    '    const MAX_NAME = 255;',
+    '',
+    '    public $name;',
+    '',
+    '    // Returns the display name.',
+    '    public function getName() {',
+    '        return $this->name;',
+    '    }',
+    '',
+    '    private function secret() {',
+    '        return null;',
+    '    }',
+    '}',
+    '',
+    'function helper() {',
+    '    return 1;',
+    '}',
+    '',
+    'enum Suit {',
+    '    case Hearts;',
+    '    case Spades;',
+    '}',
+    '',
+    'trait Greets {}',
+    'interface Named {}',
+    '',
+].join('\n');
+
+const PHP_BROKEN = ['<?php', 'class Broken {', '    function method(a {', '        return a;', '    }', '}', ''].join('\n');
+
 test.before(async () => {
-    await Promise.all(['typescript', 'python', 'go', 'rust'].map((id) => treesitter.ensureLanguage(id)));
+    await Promise.all(['typescript', 'python', 'go', 'rust', 'php'].map((id) => treesitter.ensureLanguage(id)));
 });
 
 test('langIdForPath maps the F1 extensions, and only those', () => {
@@ -215,12 +253,40 @@ test('Rust: impl methods dedupe to kind=method (not also function), parent = imp
     assert.ok(!byPath.get('not_exported').exported);
 });
 
+test('PHP: namespace/class/interface/trait/enum/function/method/constant — Class.method path, public/default visibility', () => {
+    const r = extract('sample.php', PHP);
+    assert.equal(langOf('sample.php'), 'php');
+    const byPath = new Map(r.symbols.map((s) => [s.path, s]));
+
+    assert.equal(byPath.get('App\\Models').kind, 'module');
+    assert.equal(byPath.get('VERSION').kind, 'constant');
+    assert.ok(byPath.get('VERSION').exported, 'namespace-level constant has nothing to hide behind');
+    assert.equal(byPath.get('User').kind, 'class');
+    assert.equal(byPath.get('User').doc, 'The user model.');
+    assert.equal(byPath.get('User.MAX_NAME').kind, 'constant');
+    assert.equal(byPath.get('User.MAX_NAME').parent, 'User');
+    assert.equal(byPath.get('User.getName').kind, 'method');
+    assert.equal(byPath.get('User.getName').doc, 'Returns the display name.');
+    assert.ok(byPath.get('User.getName').exported, 'public method');
+    assert.ok(!byPath.get('User.secret').exported, 'private method');
+    // Exactly one symbol for getName, not two (upstream's own
+    // @definition.function capture and the local @definition.method
+    // override both match the SAME method_declaration node).
+    assert.equal(r.symbols.filter((s) => s.name === 'getName').length, 1);
+    assert.ok(byPath.get('helper').exported);
+    assert.equal(byPath.get('Suit').kind, 'enum');
+    assert.equal(byPath.get('Greets').kind, 'interface'); // trait, same kind as an interface
+    assert.equal(byPath.get('Named').kind, 'interface');
+    assert.equal(r.analyzerVersion, treesitter.currentVersionFor('sample.php'));
+});
+
 test('a broken file in each language: parsed structure still empty, no crash', () => {
     for (const [p, src] of [
         ['broken.ts', TS_BROKEN],
         ['broken.py', PY_BROKEN],
         ['broken.go', GO_BROKEN],
         ['broken.rs', RUST_BROKEN],
+        ['broken.php', PHP_BROKEN],
     ]) {
         const r = extract(p, src);
         assert.equal(r.indexed, true);
@@ -234,6 +300,7 @@ test('F2: ERROR/MISSING nodes become treesitter-syntax diagnostics, offsets usab
         ['broken.py', PY_BROKEN],
         ['broken.go', GO_BROKEN],
         ['broken.rs', RUST_BROKEN],
+        ['broken.php', PHP_BROKEN],
     ]) {
         const v = validateSource({ rel, text: src });
         assert.ok(v.diagnostics.some((d) => d.source === 'treesitter-syntax'), `${rel} should report a syntax diagnostic`);
@@ -248,6 +315,7 @@ test('F2: ERROR/MISSING nodes become treesitter-syntax diagnostics, offsets usab
         ['sample.py', PY],
         ['sample.go', GO],
         ['sample.rs', RUST],
+        ['sample.php', PHP],
     ]) {
         const v = validateSource({ rel, text: src });
         assert.ok(!v.diagnostics.some((d) => d.source === 'treesitter-syntax'), `${rel} should be clean`);
@@ -273,6 +341,6 @@ test('runtime unavailable (injected loader): extract() degrades to "searchable, 
         assert.ok(!v.diagnostics.some((d) => d.source === 'treesitter-syntax'));
     } finally {
         treesitter._resetForTest();
-        await Promise.all(['typescript', 'python', 'go', 'rust'].map((id) => treesitter.ensureLanguage(id)));
+        await Promise.all(['typescript', 'python', 'go', 'rust', 'php'].map((id) => treesitter.ensureLanguage(id)));
     }
 });

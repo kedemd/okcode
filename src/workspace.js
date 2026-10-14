@@ -819,19 +819,36 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
         // in the graph (they have a path, a size and a hash) without dragging
         // their bytes through the facade.
         for (const row of opaque) ingestOne(row, null);
-        const sizes = new Map(toRead.map((r) => [r.path, r.size]));
-        const bodies = await readMany(
-            toRead.map((r) => r.path),
-            (p) => sizes.get(p),
-            { onFileError: warn },
-        );
-        for (const row of toRead) {
-            const buf = bodies.get(row.path);
-            if (!buf) {
-                seen.delete(row.path); // vanished or unreadable since the walk
-                continue;
+        // Read, parse and WRITE in bounded batches of `readBatchFiles`, rather
+        // than materializing every file's buffer (readMany's whole-tree `out`
+        // Map), every file's decoded text and extracted symbols, AND the one
+        // giant store.saveFiles() transaction for the whole tree all at once.
+        // A cold index of a real repo (hundreds of files) measured this as
+        // the dominant transient allocation — several times the live heap
+        // left once it is GC'd — because none of it can be freed until the
+        // LAST file of the scan is both parsed and committed. Flushing after
+        // each batch (instead of once at the end, in refresh()) means only
+        // one batch's rows, text and in-flight transaction are ever live at
+        // once; the store is still out of the ordinary READ path (unaffected
+        // — only this bulk-scan path waits on its own writes).
+        const BATCH = Math.max(1, opts.readBatchFiles || 200);
+        for (let i = 0; i < toRead.length; i += BATCH) {
+            const slice = toRead.slice(i, i + BATCH);
+            const sizes = new Map(slice.map((r) => [r.path, r.size]));
+            const bodies = await readMany(
+                slice.map((r) => r.path),
+                (p) => sizes.get(p),
+                { onFileError: warn },
+            );
+            for (const row of slice) {
+                const buf = bodies.get(row.path);
+                if (!buf) {
+                    seen.delete(row.path); // vanished or unreadable since the walk
+                    continue;
+                }
+                ingestOne({ path: row.path, size: row.size, mtime: row.mtime }, buf);
             }
-            ingestOne({ path: row.path, size: row.size, mtime: row.mtime }, buf);
+            if (store) await flush();
         }
         let removed = 0;
         for (const key of [...files.keys()]) {
@@ -2781,6 +2798,12 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
             // one: no false `total`, just whether this call's own K was hit.
             results.topK = true;
             results.truncated = sorted.length > limit;
+            // fts: 'symbols' drops the content index, so find()'s own
+            // "file text" eye (via: 'content'/'content~' above) had nothing
+            // to search — the fused answer is names/doc prose + the vector
+            // eye only. Said here, not silently: a caller comparing hit
+            // counts across workspaces needs to know one eye was missing.
+            if (store && store.contentFts === false) results.contentEyeSkipped = true;
             return results;
         },
 

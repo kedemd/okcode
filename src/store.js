@@ -559,6 +559,17 @@ async function openStore({ db, id, access, profiles = [], log = () => {} } = {})
                     // strict write refuses to compose an edit onto a lossy
                     // decode; persisting it keeps that refusal after a restart.
                     lossless: file.lossless !== false,
+                    // F3's `call: true` marker on a refs() hit: compact
+                    // (name + line only, never the surrounding node) call
+                    // sites from tree-sitter's `@reference.call` and acorn's
+                    // own cheap CallExpression/NewExpression walk — a file's
+                    // own symbols already carry everything else a caller
+                    // needs, so this is the one new thing a reference site
+                    // adds, kept small enough that a broken file's row stays
+                    // the same size as a healthy one's.
+                    references: (file.references || [])
+                        .filter((r) => r.kind === 'call')
+                        .map((r) => ({ name: r.name, line: r.line })),
                 });
                 for (const s of file.symbols || []) {
                     const name = indexedText(s.name);

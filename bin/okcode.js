@@ -34,7 +34,8 @@ global flags
 look up
   structure [--dir sub/]           directories, sizes, largest symbols
   find <query> [--kind K]          where a symbol or phrase is defined
-  refs <query>                     where it is used, by enclosing symbol
+  refs <query>                     where it is used, ranked local/imported/textual
+  importers <file>                 who resolved-imports this file (reverse edges)
   grep <pattern> [--glob G]        rg over the workspace: every matching line
   glob <pattern>                   files whose paths match a glob
   outline <file>                   one file in named pieces with line ranges
@@ -65,7 +66,10 @@ const HELP = {
     structure:
         'okcode structure [--dir sub/]\n  Directories by symbol count, total lines, and the largest top-level symbols.',
     find: 'okcode find <query> [--kind function|class|method|const|…] [--limit N]\n  Definitions by name, doc prose and file content.',
-    refs: 'okcode refs <query> [--limit N]\n  Every textual use, attributed to the symbol containing it.',
+    refs:
+        'okcode refs <query> [--limit N]\n  Every textual use, attributed to the symbol containing it, ranked and labelled against resolved imports:\n  local (defined in this file), imported (resolved from a file that defines it), or textual; [call] marks an actual call site.',
+    importers:
+        'okcode importers <file> [--limit N]\n  Files with a RESOLVED import into <file> (not a text scan — see refs): { file, line, kind, names }, following one re-export hop.',
     grep: 'okcode grep <pattern> [--regex] [--case-sensitive | --smart-case] [--glob G[,G…]] [--path DIR[,…]]\n            [--context N] [--max N] [--max-per-file N] [--limit FILES]\n            [--output lines|files|matches] [--page N] [--offset N]\n  Every matching line as file:line: text, grouped by file (rg-style); --output files\n  counts per file (rg -c), --output matches lists distinct matched strings (rg -o | uniq -c). Literal and\n  case-insensitive by default; --glob takes rg globs ("!x" excludes), repeatable.',
     glob: 'okcode glob <pattern>[,<pattern>…] [--limit N]\n  Workspace files whose paths match (rg globs; "!x" excludes). Reads no file.',
     outline:
@@ -321,11 +325,33 @@ async function refs(ws) {
         if (!byFile.has(h.file)) byFile.set(h.file, []);
         byFile.get(h.file).push(h);
     }
-    out(`\n${hits.length} textual use(s) of "${q}"\n`);
+    out(`\n${hits.length} use(s) of "${q}" (ranked: local, imported, textual; [call] = an actual call site)\n`);
     for (const [file, list] of byFile) {
         out(`  ${file}`);
-        for (const h of list) out(`    ${pad(h.line, 6)} ${pad('in ' + h.symbol, 26)} ${h.text}`);
+        for (const h of list) {
+            const tag = `${h.label}${h.call ? ', call' : ''}`;
+            out(`    ${pad(h.line, 6)} ${pad('in ' + h.symbol, 26)} [${tag}]  ${h.text}`);
+        }
         out();
+    }
+}
+
+// F3's importers(file) (reverse imports) — surfaced here as its own CLI
+// command: a terminal caller asks "who uses this file" directly, by name,
+// where the model-facing side folds the same answer into code_outline
+// instead (tools.js#codeOutline) rather than adding a second tool.
+async function importers(ws) {
+    const file = need(positional[0], 'importers needs <file>');
+    const r = await ws.importers(file, { limit: Number(flags.limit) || 40 });
+    if (JSON_OUT) return j(r);
+    if (!r.ok) {
+        out(r.reason);
+        throw new Exit(1);
+    }
+    if (!r.importers.length) return out(`nothing in ${r.file} imports it (resolved edges only — see refs for a text scan)`);
+    out(`\n${r.total} importer(s) of ${r.file}${r.truncated ? ` (showing ${r.importers.length})` : ''}\n`);
+    for (const i of r.importers) {
+        out(`  ${i.file}:${i.line}${i.kind ? `  ${i.kind}` : ''}${i.via ? `  (via ${i.via})` : ''}${i.names ? `  ${i.names.map((n) => n.local).join(', ')}` : ''}`);
     }
 }
 
@@ -591,6 +617,7 @@ const WS_COMMANDS = {
     structure,
     find,
     refs,
+    importers,
     grep: (ws) => {
         const pattern = need(positional[0], 'grep needs a pattern');
         const kase = flags['case-sensitive'] === true ? true : flags['smart-case'] === true ? 'smart' : false;

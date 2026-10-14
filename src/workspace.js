@@ -23,9 +23,10 @@
 
 const crypto = require('crypto');
 const pathPosix = require('path').posix;
-const { extract, langOf, isTextual, isSecret } = require('./analysis/parse');
+const { extract, langOf, isTextual, isSecret, analyzerVersionFor } = require('./analysis/parse');
 const { extensionFor } = require('./analysis/extensions');
 const treesitter = require('./analysis/treesitter');
+const { createEdgeIndex } = require('./edges');
 const { scanPackages, readPackages } = require('./analysis/packages');
 const { validateSourceAsync, compareDiagnostics } = require('./analysis/validate');
 const { paletteFrom } = require('./analysis/convention-color');
@@ -329,6 +330,12 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
     // file costs itself alone — never the workspace — and is reported here
     // (stats().skipped, structure().skipped) until a later walk takes it in.
     const scanWarnings = new Map();
+
+    // F3's resolved edges — a specifier -> workspace file (and named symbol,
+    // when the import names one), cached and keyed by `generation` (bumped
+    // on every ingest/drop above), so a cold refs()/importers() call after
+    // an edit always sees the current graph (DESIGN §12/WORKPLAN F3).
+    const edges = createEdgeIndex({ access });
 
     // ── ingest ──────────────────────────────────────────────────────────
 
@@ -739,13 +746,10 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
             // right. `analyzerVersion` is stamped by extract() on every
             // extension-analysed file; a mismatch against the extension's
             // current version forces the same re-ingest a hash change would.
-            const ext = extensionFor(row.path);
-            const tsVersion = treesitter.currentVersionFor(row.path);
+            const version = wantsText ? analyzerVersionFor(row.path) : null;
             const restale =
                 unchanged &&
-                (wantsText !== (prior.indexed !== false) ||
-                    (ext && prior.analyzerVersion !== ext.version) ||
-                    (tsVersion && prior.analyzerVersion !== tsVersion));
+                (wantsText !== (prior.indexed !== false) || (version && prior.analyzerVersion !== version));
             if (unchanged && !restale) {
                 prior.size = h.size;
                 prior.mtime = h.mtime;
@@ -761,12 +765,8 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
         // primitive exists to take.
         for (const { row, prior } of untouched) {
             const wantsText = isTextual(row.path, row.size);
-            const ext = extensionFor(row.path);
-            const tsVersion = treesitter.currentVersionFor(row.path);
-            const restale =
-                wantsText !== (prior.indexed !== false) ||
-                (ext && prior.analyzerVersion !== ext.version) ||
-                (tsVersion && prior.analyzerVersion !== tsVersion);
+            const version = wantsText ? analyzerVersionFor(row.path) : null;
+            const restale = wantsText !== (prior.indexed !== false) || (version && prior.analyzerVersion !== version);
             if (!restale) continue;
             if (wantsText) toRead.push(row);
             else opaque.push({ ...row, hash: prior.hash });
@@ -3005,11 +3005,20 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
 
         // ── refs ────────────────────────────────────────────────────────
         // "Where is this USED?" — the question that actually costs cycles.
-        // The `textual` confidence tier: match the text, then attribute every
-        // hit to the symbol whose line range contains it. Attribution is what
-        // makes it more than grep — a hit reads as "inside assembleContext",
-        // a place you can then read or edit by name. Labelled `textual`: a
-        // name in a comment or a string counts here.
+        // The universe is still the text scan (every hit, attributed to the
+        // symbol whose line range contains it — a hit reads as "inside
+        // assembleContext", a place you can then read or edit by name), but
+        // F3 ranks and labels it against the resolved edges instead of
+        // calling every hit equally uncertain:
+        //   `local`    the name is DEFINED in this same file
+        //   `imported` this file imports that name from a file that defines it
+        //   `textual`  neither — a name in a comment, a string, or one this
+        //              index could not resolve
+        // plus `call: true` where a stored reference SITE (tree-sitter's
+        // `@reference.call`, or acorn's own cheap CallExpression/NewExpression
+        // walk — DESIGN §12/WORKPLAN F3) lands on that exact line. Existing
+        // fields are unchanged; `confidence` still exists (now carrying the
+        // same value as `label`, kept for callers already matching on it).
         async refs(query, { limit = 40, includeSelf = false } = {}, _retried = false) {
             if (unindexed) throw notIndexed('finding uses');
             await ensureOpen();
@@ -3017,7 +3026,12 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
             // can still hold `indexed: true` for a file that must not be read.
             await ensureTexts(list().filter((f) => f.indexed !== false && !isSecret(f.path)));
             const q = String(query);
-            const out = [];
+            // The ranking needs the WHOLE universe before it can sort, so
+            // this no longer stops at `limit` while scanning — only a much
+            // larger hard cap, to keep one query from reading every line of
+            // an enormous workspace. `limit` still bounds what is RETURNED.
+            const hardCap = Math.max(limit * 20, 400);
+            const raw = [];
             outer: for (const f of list()) {
                 if (f.indexed === false || isSecret(f.path) || typeof f.content !== 'string') continue;
                 const lines = f.content.split('\n');
@@ -3027,22 +3041,90 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
                     const owner = ownerOf(f, ln);
                     // The declaration itself is not a use of itself.
                     if (!includeSelf && owner && owner.name === q && owner.lineStart === ln) continue;
-                    out.push({
-                        file: f.rel,
-                        line: ln,
-                        symbol: owner ? owner.path || owner.name : '(top level)',
-                        kind: owner ? owner.kind : null,
-                        text: lines[i].trim().slice(0, 160),
-                        confidence: 'textual',
-                        at: f.hash,
-                    });
-                    if (out.length >= limit) break outer;
+                    raw.push({ f, ln, owner, text: lines[i].trim().slice(0, 160) });
+                    if (raw.length >= hardCap) break outer;
                 }
             }
-            if (!_retried && out.length && (await resultSetCheck(out.map((h) => h.file))).changed) {
+            await edges.ensure(list(), generation);
+            // A symbol literally named `q`, defined anywhere in this file —
+            // `local` cares that it is defined HERE, not which line.
+            const definesLocally = (f) => (f.symbols || []).some((s) => s.name === q);
+            const fileDefines = (rel, name) => {
+                const t = byRel(rel);
+                return !!(t && (t.symbols || []).some((s) => s.name === name));
+            };
+            // `imported`: some resolved edge out of this file binds `q` to a
+            // name the TARGET file actually defines — an edge that merely
+            // points at a file (a side-effect import, an unresolved target)
+            // does not qualify on its own. One further re-export hop is
+            // followed on the target, same as importers()'s own one-hop
+            // rule: a barrel (`export * from './util'`) has no symbols of
+            // its own, so "the file that defines it" is one step past it.
+            const importedFrom = (f) => {
+                for (const e of edges.importsOf(f.rel)) {
+                    if (!e.to) continue;
+                    const pair = (e.names || []).find((n) => n.local === q);
+                    const name = pair ? pair.imported : e.name === q ? q : null;
+                    if (name == null) continue;
+                    if (fileDefines(e.to, name)) return true;
+                    for (const e2 of edges.importsOf(e.to)) {
+                        if (!e2.reexport || !e2.to) continue;
+                        const pair2 = (e2.names || []).find((n) => n.imported === name);
+                        if ((pair2 || !e2.names) && fileDefines(e2.to, pair2 ? pair2.imported : name)) return true;
+                    }
+                }
+                return false;
+            };
+            // `references` is either freshly-parsed (every kind tree-sitter's
+            // tags.scm captures: call/type/class/implementation) or loaded
+            // back from the store, already trimmed to call sites only (see
+            // store.js#saveFiles) — the `!r.kind || …` keeps both shapes
+            // honest about meaning "a CALL landed here", not any reference.
+            const callAt = (f, ln) => (f.references || []).some((r) => r.line === ln && r.name === q && (!r.kind || r.kind === 'call'));
+            const out = raw.map((h) => {
+                const label = definesLocally(h.f) ? 'local' : importedFrom(h.f) ? 'imported' : 'textual';
+                return {
+                    file: h.f.rel,
+                    line: h.ln,
+                    symbol: h.owner ? h.owner.path || h.owner.name : '(top level)',
+                    kind: h.owner ? h.owner.kind : null,
+                    text: h.text,
+                    confidence: label,
+                    label,
+                    call: callAt(h.f, h.ln),
+                    at: h.f.hash,
+                };
+            });
+            // "Definitions' own files and importers first, then the rest" —
+            // a STABLE sort, so ties keep the file/line order the scan found
+            // them in.
+            const rank = { local: 0, imported: 1, textual: 2 };
+            out.sort((a, b) => rank[a.label] - rank[b.label]);
+            const limited = out.slice(0, limit);
+            if (!_retried && limited.length && (await resultSetCheck(limited.map((h) => h.file))).changed) {
                 return api.refs(query, { limit, includeSelf }, true);
             }
-            return out;
+            return limited;
+        },
+
+        // ── importers ──────────────────────────────────────────────────
+        // The reverse of `imports`: every file with a RESOLVED edge into
+        // `file` — an import this index could actually follow to a
+        // definition, not a text match (that is `refs`). Follows a
+        // re-export one hop (barrel files), and — for okjs — a file using
+        // a component's TAG is an importer of the file defining that
+        // component (F4 item 3: "who uses <setting-group>" is a resolved
+        // ref, not a grep for the tag string).
+        async importers(file, { limit = 40 } = {}) {
+            if (unindexed) throw notIndexed('finding importers');
+            await ensureOpen();
+            const f = fileOf(file);
+            if (!f) return { ok: false, reason: await explainTarget(file) };
+            await edges.ensure(list(), generation);
+            const hits = edges
+                .importersOf(f.rel)
+                .map((e) => ({ file: e.file, line: e.line, kind: e.kind, names: e.names, via: e.via || null }));
+            return { ok: true, file: f.rel, total: hits.length, truncated: hits.length > limit, importers: hits.slice(0, limit) };
         },
 
         // ── read ────────────────────────────────────────────────────────

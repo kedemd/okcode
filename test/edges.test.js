@@ -237,6 +237,75 @@ describe('F3 resolved edges + F4.3 okjs component usage', () => {
         assert.deepEqual((await ws.importers('src/Services/Logger.php')).importers.map((i) => i.file), ['src/Controller.php']);
     });
 
+    it("Java: `import a.b.C;` resolves via the workspace's own package declarations, `import a.b.*;` resolves to every class in the package, and `import static` peels the member off", async () => {
+        const { ws } = await setup({
+            'src/com/example/lib/Foo.java': 'package com.example.lib;\n\npublic class Foo {\n    public static int baz() { return 1; }\n}\n',
+            'src/com/example/lib/Bar.java': 'package com.example.lib;\n\npublic class Bar {}\n',
+            'src/com/example/app/App.java':
+                'package com.example.app;\n\nimport com.example.lib.Foo;\n\npublic class App {\n    void run() { Foo.baz(); }\n}\n',
+            'src/com/example/app/Other.java':
+                'package com.example.app;\n\nimport com.example.lib.*;\n\npublic class Other {}\n',
+            'src/com/example/app/UsesStatic.java':
+                'package com.example.app;\n\nimport static com.example.lib.Foo.baz;\n\npublic class UsesStatic {}\n',
+        });
+        await treesitter.ensureLanguage('java');
+        await ws.sync();
+        const foo = await ws.importers('src/com/example/lib/Foo.java');
+        assert.ok(foo.ok, JSON.stringify(foo));
+        // App.java's plain import, UsesStatic.java's static import, AND
+        // Other.java's wildcard (which pulls in every class under the
+        // package, Foo included) all resolve to Foo.
+        assert.deepEqual(
+            new Set(foo.importers.map((i) => i.file)),
+            new Set(['src/com/example/app/App.java', 'src/com/example/app/UsesStatic.java', 'src/com/example/app/Other.java']),
+        );
+        // The wildcard import resolves to EVERY class the package index
+        // has, Foo and Bar both — not one target.
+        const bar = await ws.importers('src/com/example/lib/Bar.java');
+        assert.ok(bar.importers.some((i) => i.file === 'src/com/example/app/Other.java'));
+    });
+
+    it('C#: `using A.B;` binds the namespace, resolving to every file that declares it, not one target', async () => {
+        const { ws } = await setup({
+            'Services/Mailer.cs': 'namespace App.Services {\n    public class Mailer {}\n}\n',
+            'Services/Logger.cs': 'namespace App.Services {\n    public class Logger {}\n}\n',
+            'Controller.cs':
+                'using App.Services;\n\nnamespace App {\n    public class Controller {\n        void Run() { }\n    }\n}\n',
+        });
+        await treesitter.ensureLanguage('csharp');
+        await ws.sync();
+        assert.deepEqual((await ws.importers('Services/Mailer.cs')).importers.map((i) => i.file), ['Controller.cs']);
+        assert.deepEqual((await ws.importers('Services/Logger.cs')).importers.map((i) => i.file), ['Controller.cs']);
+    });
+
+    it('C: `#include "x.h"` resolves relative to the including file then the workspace root; `#include <...>` only under a directory literally named `include`', async () => {
+        const { ws } = await setup({
+            'src/util.h': 'int helper(int a);\n',
+            'src/main.c': '#include "util.h"\n#include <stdio.h>\n\nint main() { return helper(1); }\n',
+            'include/common.h': 'int shared(void);\n',
+            'other/thing.c': '#include <common.h>\n\nint x(void) { return shared(); }\n',
+        });
+        await treesitter.ensureLanguage('c');
+        await ws.sync();
+        assert.deepEqual((await ws.importers('src/util.h')).importers.map((i) => i.file), ['src/main.c']);
+        // <stdio.h> matches no workspace path under a directory named
+        // `include` — stays unresolved, not guessed.
+        assert.deepEqual((await ws.importers('include/common.h')).importers.map((i) => i.file), ['other/thing.c']);
+    });
+
+    it('C++: an out-of-line `Foo::bar` definition resolves its parent by name, not containment (the class can live in a different file entirely)', async () => {
+        const { ws } = await setup({
+            'box.h': 'class Box {\npublic:\n  void bar();\n};\n',
+            'box.cpp': '#include "box.h"\n\nvoid Box::bar() { return; }\n',
+        });
+        await treesitter.ensureLanguage('cpp');
+        await ws.sync();
+        const r = await ws.read('box.cpp#Box.bar');
+        assert.ok(r.ok, JSON.stringify(r));
+        assert.match(r.body, /void Box::bar/);
+        assert.deepEqual((await ws.importers('box.h')).importers.map((i) => i.file), ['box.cpp']);
+    });
+
     it('JS: a multi-name import (`import { a, b } from …`) resolves BOTH names, listing the importer once with both in `names`', async () => {
         const { ws } = await setup({
             'util.mjs': 'export function a() { return 1; }\nexport function b() { return 2; }\nexport function unused() { return 3; }\n',

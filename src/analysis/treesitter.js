@@ -70,7 +70,7 @@ const LANGUAGES = {
         // full-signature fix (DESIGN §12): `signature` used to be just the
         // definition's first source line, truncating a multi-line parameter
         // list.
-        queryVersion: 3,
+        queryVersion: 4,
         importQueryVersion: 1,
         comment: { line: '//', blockOpen: '/*', blockClose: '*/' },
         // `export` wraps the declaration one level up (`export class C {}`
@@ -93,7 +93,7 @@ const LANGUAGES = {
         wasm: 'tree-sitter-python.wasm',
         // Bumped for the decorator-span fix, then again for the
         // full-signature fix — see the typescript entry above.
-        queryVersion: 3,
+        queryVersion: 4,
         importQueryVersion: 1,
         comment: { line: '#' },
         // PEP 8 convention, not syntax: a single leading underscore means
@@ -117,7 +117,7 @@ const LANGUAGES = {
         wasm: 'tree-sitter-go.wasm',
         // Bumped for the full-signature fix — see the typescript entry
         // above.
-        queryVersion: 2,
+        queryVersion: 3,
         importQueryVersion: 1,
         comment: { line: '//' },
         // Go's own export rule IS syntax: capitalised identifiers are
@@ -131,7 +131,7 @@ const LANGUAGES = {
         wasm: 'tree-sitter-rust.wasm',
         // Bumped for the decorator-span fix, then again for the
         // full-signature fix — see the typescript entry above.
-        queryVersion: 3,
+        queryVersion: 4,
         importQueryVersion: 1,
         comment: { line: '//' },
         isExported(defNode) {
@@ -154,7 +154,7 @@ const LANGUAGES = {
         wasm: 'tree-sitter-php.wasm',
         // Bumped for the full-signature fix — see the typescript entry
         // above.
-        queryVersion: 2,
+        queryVersion: 3,
         importQueryVersion: 1,
         comment: { line: '//', blockOpen: '/*', blockClose: '*/' },
         // PHP's own visibility IS the export rule for a class member: no
@@ -179,6 +179,135 @@ const LANGUAGES = {
         // instead is the SIGNATURE, which must skip the leading
         // `attribute_list` to find where the def itself actually starts.
         decorators: { leadingChildTypes: ['attribute_list'] },
+    },
+    java: {
+        exts: ['.java'],
+        wasm: 'tree-sitter-java.wasm',
+        queryVersion: 2,
+        importQueryVersion: 1,
+        comment: { line: '//', blockOpen: '/*', blockClose: '*/' },
+        // Java's own visibility IS the export rule, same shape Go's
+        // capitalisation and Rust's `pub` check already are: an explicit
+        // `public` modifier, nothing else — package-private (Java's actual
+        // default, unlike PHP's "no modifier = public") has nothing to
+        // hide behind either, so it is simply not exported.
+        isExported(defNode) {
+            for (let i = 0; i < defNode.childCount; i++) {
+                const c = defNode.child(i);
+                if (c.type === 'modifiers') {
+                    for (let j = 0; j < c.childCount; j++) if (c.child(j).type === 'public') return true;
+                    return false;
+                }
+            }
+            return false;
+        },
+        // `@Deprecated`/`@Override` sit in the SAME `modifiers` node as
+        // `public`/`static`/`final` — Java's grammar does not separate an
+        // annotation from a modifier keyword the way PHP's `attribute_list`
+        // or TypeScript's `decorator` siblings are separated from theirs.
+        // The definition's SPAN is already right (`modifiers` is already a
+        // field inside the node, same as PHP's `attribute_list`), but the
+        // one-line signature has to skip the whole node to read as code
+        // rather than an annotation — the cost, undone nowhere else in this
+        // table, is that `public`/`static`/`final` are skipped from the
+        // signature line too; a coarser grain than PHP's, because Java
+        // bundles the two together where PHP keeps them apart.
+        decorators: { leadingChildTypes: ['modifiers'] },
+    },
+    csharp: {
+        exts: ['.cs'],
+        wasm: 'tree-sitter-c_sharp.wasm',
+        queryVersion: 2,
+        importQueryVersion: 1,
+        comment: { line: '//', blockOpen: '/*', blockClose: '*/' },
+        // Same "explicit `public` or nothing" rule as Java above; C#'s
+        // modifiers are several separate sibling `modifier` nodes (one per
+        // keyword) rather than Java's single bundled one, but the check is
+        // the same shape.
+        isExported(defNode) {
+            for (let i = 0; i < defNode.childCount; i++) {
+                const c = defNode.child(i);
+                if (c.type !== 'modifier') continue;
+                for (let j = 0; j < c.childCount; j++) if (c.child(j).type === 'public') return true;
+            }
+            return false;
+        },
+        // `[Obsolete]` is its own `attribute_list` field, separate from the
+        // `modifier` node(s) — unlike Java, so only the attribute itself,
+        // not the modifiers, is skipped from the signature.
+        decorators: { leadingChildTypes: ['attribute_list'] },
+    },
+    // `.h` defaults to C, not C++: most `.h` files in the wild are plain C
+    // or C-compatible headers, and tree-sitter-c chokes far less politely
+    // on a stray C++-only header than the reverse would. This is a known,
+    // documented gap (DESIGN §12) rather than a workspace-aware rule: a
+    // project whose `.h` files are actually C++ (classes, namespaces,
+    // templates) will see those as syntax errors / unextracted symbols
+    // under this grammar — rename to `.hpp` to get the C++ grammar instead.
+    // Making the choice workspace-conditional would need `langIdForPath`
+    // (called from many places with no workspace in hand) to stop being a
+    // static extension map, which is a bigger change than this gap justifies.
+    c: {
+        exts: ['.c'],
+        wasm: 'tree-sitter-c.wasm',
+        queryVersion: 2,
+        importQueryVersion: 1,
+        comment: { line: '//', blockOpen: '/*', blockClose: '*/' },
+        // Unlike every other language here, this grammar's own
+        // `function_declarator` (what upstream's tags.scm captures) is
+        // only the name+params — not the return type before it, nor the
+        // body after it. `widenSpan` (consumed generically in
+        // buildSymbols, not language-specific code) says: when the
+        // captured node's immediate parent is one of these types, the
+        // definition's REAL span — and the node `isExported`/`decorators`
+        // are evaluated against — is the parent's. A bare prototype
+        // (`int add(int, int);`, no body, e.g. in a header) has no such
+        // parent, so it keeps its own small range — still useful, just
+        // signature-only, exactly like a `.d.ts` declaration would be.
+        widenSpan: { parentTypes: ['function_definition'] },
+        // "exported" = non-`static` AT FILE SCOPE — `static` is C's own
+        // internal-linkage keyword; there is no further visibility concept
+        // once inside a struct (a struct member has no linkage of its own
+        // to hide), so this only ever applies with no enclosing definition.
+        isExported(defNode, _name, parent) {
+            if (parent) return false;
+            for (let i = 0; i < defNode.childCount; i++) {
+                const c = defNode.child(i);
+                if (c.type === 'storage_class_specifier' && c.text === 'static') return false;
+            }
+            return true;
+        },
+    },
+    cpp: {
+        // `.h` too: tree-sitter's C++ grammar is built on its C grammar, so a C
+        // header parses the same, while a C++ header (classes, namespaces,
+        // templates) under the C grammar is a wall of syntax errors.
+        exts: ['.cpp', '.cc', '.cxx', '.h', '.hpp', '.hh', '.hxx', '.ipp'],
+        wasm: 'tree-sitter-cpp.wasm',
+        queryVersion: 2,
+        importQueryVersion: 1,
+        comment: { line: '//', blockOpen: '/*', blockClose: '*/' },
+        // Same declarator/definition split as C above — see that entry's
+        // comment on `widenSpan`.
+        widenSpan: { parentTypes: ['function_definition'] },
+        // Same non-static-at-file-scope rule as C above.
+        isExported(defNode, _name, parent) {
+            if (parent) return false;
+            for (let i = 0; i < defNode.childCount; i++) {
+                const c = defNode.child(i);
+                if (c.type === 'storage_class_specifier' && c.text === 'static') return false;
+            }
+            return true;
+        },
+        // `[[deprecated]]` parses as a FIELD already inside the function's
+        // own node (`attribute_declaration`), same shape PHP's `#[...]`
+        // `attribute_list` is — once `widenSpan` above has widened the
+        // captured `function_declarator` out to its `function_definition`,
+        // this is the widened node's own first child. A template's
+        // `template<...>` uses the SAME `wrapperTypes` mechanism Python's
+        // `@decorator`s already use, climbing one more level when the
+        // (possibly already-widened) node's parent is `template_declaration`.
+        decorators: { leadingChildTypes: ['attribute_declaration'], wrapperTypes: ['template_declaration'] },
     },
 };
 
@@ -549,10 +678,18 @@ function signatureOf(src, contentStart, node, cfg) {
 // otherwise.
 function decoratedSpan(node, dec) {
     let start = node.startIndex;
+    let end = node.endIndex;
     let contentStart = node.startIndex;
-    if (!dec) return { start, contentStart };
+    if (!dec) return { start, contentStart, end };
     if (dec.wrapperTypes && node.parent && dec.wrapperTypes.includes(node.parent.type)) {
+        // The wrapper's LAST child is always the def itself (Python's
+        // `decorated_definition`, C++'s `template_declaration`), so its own
+        // end already equals the def's — widening `end` too is a no-op for
+        // every existing use, and correct for C++'s template case, where
+        // `template_declaration` additionally swallows the trailing `;` a
+        // templated class declaration can carry.
         start = node.parent.startIndex;
+        end = node.parent.endIndex;
     }
     if (dec.siblingTypes) {
         let prev = node.previousSibling;
@@ -570,7 +707,22 @@ function decoratedSpan(node, dec) {
         }
         if (child) contentStart = child.startIndex;
     }
-    return { start, contentStart };
+    return { start, contentStart, end };
+}
+
+// C/C++'s grammar captures a function's narrow name+params node
+// (`function_declarator`) as the thing carrying `@name` — separate from
+// the return type before it and the body after it, unlike every other
+// definition in this table, where the captured node already IS the full
+// span. `cfg.widenSpan` (LANGUAGES' c/cpp entries) says: when the captured
+// node's immediate parent is one of these types, the definition's real
+// span — and the node `isExported`/`decorators` are evaluated against — is
+// the PARENT's. Applied once, before decoratedSpan, so a templated C++
+// function still composes correctly with `decorators.wrapperTypes` above
+// (checked against the now-widened node's own parent).
+function widenToParent(node, widen) {
+    if (widen && node.parent && widen.parentTypes.includes(node.parent.type)) return node.parent;
+    return node;
 }
 
 // tree-sitter marks a syntax error as either an ERROR node (unexpected
@@ -662,16 +814,17 @@ function buildSymbols(id, cfg, src, tree, query) {
         if (!existing.parent && d.parent) existing.parent = d.parent;
     }
     const defs = [...byRange.values()].map((d) => {
-        const { start, contentStart } = decoratedSpan(d.node, cfg.decorators);
+        const node = widenToParent(d.node, cfg.widenSpan);
+        const { start, contentStart, end } = decoratedSpan(node, cfg.decorators);
         return {
             name: d.name,
             kind: d.kind,
             start,
             contentStart,
-            end: d.node.endIndex,
+            end,
             explicitParent: d.parent,
             doc: d.doc,
-            node: d.node,
+            node,
         };
     });
 
@@ -691,7 +844,19 @@ function buildSymbols(id, cfg, src, tree, query) {
                 if (!parent || other.end - other.start < parent.end - parent.start) parent = other;
             }
         }
-        d.parent = parent ? parent.name : null;
+        d.parentDef = parent;
+        d.parent = null;
+    }
+    // A path is the WHOLE chain (`App.Box.bar`), and `parent` is the
+    // parent's path, as in parse.js's JS extractor: the parent's own name
+    // alone loses every level above it. Sorted by start, a container is
+    // always settled before what it contains.
+    for (const d of defs) {
+        if (d.explicitParent) d.path = `${d.explicitParent}.${d.name}`;
+        else if (d.parentDef) {
+            d.parent = d.parentDef.path;
+            d.path = `${d.parent}.${d.name}`;
+        } else d.path = d.name;
     }
 
     // Doc fallback, in order: the same-match @doc capture (already merged
@@ -719,7 +884,7 @@ function buildSymbols(id, cfg, src, tree, query) {
     const symbols = defs.map((d) => ({
         name: d.name,
         kind: d.kind,
-        path: d.parent ? `${d.parent}.${d.name}` : d.name,
+        path: d.path,
         ...(d.parent ? { parent: d.parent } : {}),
         start: d.start,
         end: d.end,

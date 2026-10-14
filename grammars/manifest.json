@@ -18,5 +18,21 @@
     "php": {
         "package": "tree-sitter-php",
         "version": "0.24.2"
+    },
+    "java": {
+        "package": "tree-sitter-java",
+        "version": "0.23.5"
+    },
+    "csharp": {
+        "package": "tree-sitter-c-sharp",
+        "version": "0.23.5"
+    },
+    "c": {
+        "package": "tree-sitter-c",
+        "version": "0.24.1"
+    },
+    "cpp": {
+        "package": "tree-sitter-cpp",
+        "version": "0.23.4"
     }
 }

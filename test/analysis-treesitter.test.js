@@ -170,8 +170,103 @@ const PHP = [
 
 const PHP_BROKEN = ['<?php', 'class Broken {', '    function method(a {', '        return a;', '    }', '}', ''].join('\n');
 
+const JAVA = [
+    'package com.example.app;',
+    '',
+    '/** The user class. */',
+    'public class User {',
+    '    public static final int MAX_NAME = 255;',
+    '',
+    '    public User() {}',
+    '',
+    '    // Returns the display name.',
+    '    public String getName() {',
+    '        return null;',
+    '    }',
+    '',
+    '    private void secret() {}',
+    '}',
+    '',
+    'enum Suit {',
+    '    HEARTS, SPADES',
+    '}',
+    '',
+    'interface Named {}',
+    '',
+    'record Point(int x, int y) {}',
+    '',
+].join('\n');
+
+const JAVA_BROKEN = ['package app;', '', 'class Broken {', '    void method(int a {', '        return;', '    }', '}', ''].join('\n');
+
+const CSHARP = [
+    'namespace App.Models {',
+    '    public struct Point {}',
+    '',
+    '    public enum Color { Red, Blue }',
+    '',
+    '    /// The user class.',
+    '    public class User {',
+    '        public string GetName() { return null; }',
+    '',
+    '        public int Age { get; set; }',
+    '',
+    '        private void Secret() {}',
+    '    }',
+    '}',
+    '',
+].join('\n');
+
+const CSHARP_BROKEN = ['namespace App {', '    class Broken {', '        void Method(int a {', '            return;', '        }', '    }', '}', ''].join('\n');
+
+const C = [
+    '#define MAX 10',
+    '#define SQ(x) ((x)*(x))',
+    '',
+    'typedef struct { int x; int y; } Point;',
+    '',
+    'enum Color { RED, BLUE };',
+    '',
+    'static int internalHelper(int a) {',
+    '    return a;',
+    '}',
+    '',
+    'int add(int a, int b) {',
+    '    return a + b;',
+    '}',
+    '',
+].join('\n');
+
+const C_BROKEN = ['int add(int a, int b) {', '    return a +', '}', ''].join('\n');
+
+const CPP = [
+    'class Box {',
+    'public:',
+    '  void bar();',
+    '};',
+    '',
+    'void Box::bar() { return; }',
+    '',
+    'namespace App {',
+    '  enum Color { Red, Blue };',
+    '',
+    '  [[deprecated]]',
+    '  int helper() { return 1; }',
+    '',
+    '  template<typename T>',
+    '  class Wrapper { T value; };',
+    '}',
+    '',
+    'static int internalHelper() { return 2; }',
+    '',
+].join('\n');
+
+const CPP_BROKEN = ['class Broken {', '  void method(int a {', '    return;', '  }', '};', ''].join('\n');
+
 test.before(async () => {
-    await Promise.all(['typescript', 'python', 'go', 'rust', 'php'].map((id) => treesitter.ensureLanguage(id)));
+    await Promise.all(
+        ['typescript', 'python', 'go', 'rust', 'php', 'java', 'csharp', 'c', 'cpp'].map((id) => treesitter.ensureLanguage(id)),
+    );
 });
 
 test('langIdForPath maps the F1 extensions, and only those', () => {
@@ -196,7 +291,7 @@ test('TypeScript: class/function/arrow-const/type/enum/method — all of upstrea
     assert.equal(byPath.get('Circle.area').kind, 'method');
     assert.equal(byPath.get('Circle.area').doc, 'method doc');
     // Nested function inside a method, by containment — same rule as acorn's.
-    assert.equal(byPath.get('area.helper').parent, 'area');
+    assert.equal(byPath.get('Circle.area.helper').parent, 'Circle.area');
     assert.equal(byPath.get('Point').kind, 'type');
     assert.ok(byPath.get('Point').exported);
     assert.equal(byPath.get('makeCircle').kind, 'function'); // export const f = (...) => ...
@@ -217,7 +312,7 @@ test('Python: docstring override (class own vs nested method), underscore conven
     // The class's own docstring must not leak onto a nested method's doc,
     // and vice versa — each is owned by its SMALLEST enclosing definition.
     assert.notEqual(byPath.get('Animal').doc, byPath.get('Animal.speak').doc);
-    assert.equal(byPath.get('speak.inner_helper').doc, '');
+    assert.equal(byPath.get('Animal.speak.inner_helper').doc, '');
     assert.ok(byPath.get('make_animal').exported);
     assert.equal(byPath.get('make_animal').doc, 'Factory function.');
     assert.ok(byPath.get('CONST_VALUE').exported);
@@ -280,6 +375,93 @@ test('PHP: namespace/class/interface/trait/enum/function/method/constant — Cla
     assert.equal(r.analyzerVersion, treesitter.currentVersionFor('sample.php'));
 });
 
+test('Java: package/class/interface/enum/record/method/constructor/static-final-constant — Class.method path, public/package-private visibility', () => {
+    const r = extract('sample.java', JAVA);
+    assert.equal(langOf('sample.java'), 'java');
+    const byPath = new Map(r.symbols.map((s) => [s.path, s]));
+
+    assert.equal(byPath.get('com.example.app').kind, 'module');
+    assert.equal(byPath.get('User').kind, 'class');
+    assert.equal(byPath.get('User').doc, 'The user class.');
+    assert.ok(byPath.get('User').exported, 'public class');
+    assert.equal(byPath.get('User.MAX_NAME').kind, 'constant');
+    assert.equal(byPath.get('User.MAX_NAME').parent, 'User');
+    assert.ok(byPath.get('User.MAX_NAME').exported);
+    assert.equal(byPath.get('User.User').kind, 'method'); // constructor, same name as its class
+    assert.equal(byPath.get('User.getName').kind, 'method');
+    assert.equal(byPath.get('User.getName').doc, 'Returns the display name.');
+    assert.ok(byPath.get('User.getName').exported, 'public method');
+    assert.ok(!byPath.get('User.secret').exported, 'package-private method, no `public`');
+    assert.equal(byPath.get('Suit').kind, 'enum');
+    assert.equal(byPath.get('Named').kind, 'interface');
+    assert.equal(byPath.get('Point').kind, 'class'); // record
+    assert.ok(!byPath.get('Suit').exported, 'top-level type with no `public` modifier');
+    assert.equal(r.analyzerVersion, treesitter.currentVersionFor('sample.java'));
+});
+
+test('C#: namespace/struct/enum/class/method/property — dotted namespace containment, public/default visibility', () => {
+    const r = extract('sample.cs', CSHARP);
+    assert.equal(langOf('sample.cs'), 'csharp');
+    const byPath = new Map(r.symbols.map((s) => [s.path, s]));
+
+    assert.equal(byPath.get('App.Models').kind, 'module');
+    assert.equal(byPath.get('App.Models.Point').kind, 'class'); // struct
+    assert.equal(byPath.get('App.Models.Color').kind, 'enum');
+    assert.equal(byPath.get('App.Models.User').kind, 'class');
+    assert.equal(byPath.get('App.Models.User').doc, 'The user class.');
+    assert.equal(byPath.get('App.Models.User.GetName').kind, 'method');
+    assert.equal(byPath.get('App.Models.User.GetName').parent, 'App.Models.User');
+    assert.ok(byPath.get('App.Models.User.GetName').exported, 'public method');
+    assert.equal(byPath.get('App.Models.User.Age').kind, 'property');
+    assert.ok(byPath.get('App.Models.User.Age').exported);
+    assert.ok(!byPath.get('App.Models.User.Secret').exported, 'private method');
+    assert.equal(r.analyzerVersion, treesitter.currentVersionFor('sample.cs'));
+});
+
+test('C: macro/typedef/enum/function — non-static-at-file-scope visibility, full span for a function (not just its declarator)', () => {
+    const r = extract('sample.c', C);
+    assert.equal(langOf('sample.c'), 'c');
+    const byPath = new Map(r.symbols.map((s) => [s.path, s]));
+
+    assert.equal(byPath.get('MAX').kind, 'macro');
+    assert.equal(byPath.get('SQ').kind, 'macro');
+    assert.equal(byPath.get('Point').kind, 'type'); // typedef struct
+    assert.equal(byPath.get('Color').kind, 'enum');
+    assert.ok(!byPath.get('internalHelper').exported, 'static — internal linkage');
+    assert.ok(byPath.get('add').exported);
+    // The widened span reaches the body, not just the `add(int a, int b)`
+    // declarator upstream's own tags.scm captures on its own.
+    assert.ok(byPath.get('add').signature.startsWith('int add('));
+    assert.equal(byPath.get('add').lineEnd, byPath.get('add').lineStart + 2);
+    assert.equal(r.analyzerVersion, treesitter.currentVersionFor('sample.c'));
+});
+
+test('C++: namespace/class/method (in-class and out-of-line)/enum/template/attribute — Class.method path incl. Foo::bar, non-static-at-file-scope visibility', () => {
+    const r = extract('sample.cpp', CPP);
+    assert.equal(langOf('sample.cpp'), 'cpp');
+    const byPath = new Map(r.symbols.map((s) => [s.path, s]));
+
+    assert.equal(byPath.get('Box').kind, 'class');
+    const bars = r.symbols.filter((s) => s.name === 'bar');
+    assert.equal(bars.length, 2, 'the in-class prototype AND the out-of-line definition are both symbols');
+    assert.ok(bars.every((s) => s.kind === 'method' && s.parent === 'Box'));
+    // The signature stops at the body now; the SPAN is what carries it.
+    const outOfLine = bars.find((s) => CPP.slice(s.start, s.end).includes('return'));
+    assert.ok(outOfLine, 'the out-of-line definition carries the full widened span, body included');
+    assert.equal(byPath.get('App').kind, 'module');
+    assert.equal(byPath.get('App.Color').kind, 'enum');
+    assert.equal(byPath.get('App.helper').kind, 'function');
+    assert.equal(byPath.get('App.Wrapper').kind, 'class');
+    // The template's own SPAN reaches back to `template<typename T>` via
+    // the same `wrapperTypes` mechanism Python's `@decorator` already
+    // uses — the one-line signature itself still starts at `class
+    // Wrapper`, same "decorator skipped from the signature" convention.
+    assert.ok(byPath.get('App.Wrapper').start < CPP.indexOf('class Wrapper'), 'span widened back to the template line');
+    assert.ok(byPath.get('App.Wrapper').signature.startsWith('class Wrapper'));
+    assert.ok(!byPath.get('internalHelper').exported, 'static — internal linkage');
+    assert.equal(r.analyzerVersion, treesitter.currentVersionFor('sample.cpp'));
+});
+
 test('signature: the full definition up to its BODY, not just the first line — multi-line params, per language', () => {
     const ts = [
         'export async function createUser(',
@@ -338,6 +520,10 @@ test('a broken file in each language: parsed structure still empty, no crash', (
         ['broken.go', GO_BROKEN],
         ['broken.rs', RUST_BROKEN],
         ['broken.php', PHP_BROKEN],
+        ['broken.java', JAVA_BROKEN],
+        ['broken.cs', CSHARP_BROKEN],
+        ['broken.c', C_BROKEN],
+        ['broken.cpp', CPP_BROKEN],
     ]) {
         const r = extract(p, src);
         assert.equal(r.indexed, true);
@@ -352,6 +538,10 @@ test('F2: ERROR/MISSING nodes become treesitter-syntax diagnostics, offsets usab
         ['broken.go', GO_BROKEN],
         ['broken.rs', RUST_BROKEN],
         ['broken.php', PHP_BROKEN],
+        ['broken.java', JAVA_BROKEN],
+        ['broken.cs', CSHARP_BROKEN],
+        ['broken.c', C_BROKEN],
+        ['broken.cpp', CPP_BROKEN],
     ]) {
         const v = validateSource({ rel, text: src });
         assert.ok(v.diagnostics.some((d) => d.source === 'treesitter-syntax'), `${rel} should report a syntax diagnostic`);
@@ -367,6 +557,10 @@ test('F2: ERROR/MISSING nodes become treesitter-syntax diagnostics, offsets usab
         ['sample.go', GO],
         ['sample.rs', RUST],
         ['sample.php', PHP],
+        ['sample.java', JAVA],
+        ['sample.cs', CSHARP],
+        ['sample.c', C],
+        ['sample.cpp', CPP],
     ]) {
         const v = validateSource({ rel, text: src });
         assert.ok(!v.diagnostics.some((d) => d.source === 'treesitter-syntax'), `${rel} should be clean`);
@@ -392,6 +586,16 @@ test('runtime unavailable (injected loader): extract() degrades to "searchable, 
         assert.ok(!v.diagnostics.some((d) => d.source === 'treesitter-syntax'));
     } finally {
         treesitter._resetForTest();
-        await Promise.all(['typescript', 'python', 'go', 'rust', 'php'].map((id) => treesitter.ensureLanguage(id)));
+        await Promise.all(
+            ['typescript', 'python', 'go', 'rust', 'php', 'java', 'csharp', 'c', 'cpp'].map((id) => treesitter.ensureLanguage(id)),
+        );
     }
+});
+
+test('.h: parsed with the C++ grammar — a C++ header keeps its classes and full paths, a C header still parses', () => {
+    assert.equal(langOf('box.h'), 'cpp');
+    const cpp = extract('box.h', 'namespace App {\nclass Box {\npublic:\n  void bar();\n};\n}\n');
+    assert.deepEqual(cpp.symbols.map((s) => s.path), ['App', 'App.Box', 'App.Box.bar']);
+    const c = extract('util.h', '#define MAX 3\nint add(int a, int b);\n');
+    assert.deepEqual(c.symbols.map((s) => s.name).sort(), ['MAX', 'add']);
 });

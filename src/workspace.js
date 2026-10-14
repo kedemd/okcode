@@ -272,6 +272,13 @@ function parseRange(query) {
     return { file: m[1], from: Number(m[2]), to: m[3] ? Number(m[3]) : Number(m[2]) };
 }
 
+// A qualified hint (`Box.bar`) matches a symbol whose path ends with it at a
+// `.` boundary (`App.Box.bar`). A bare name is left to the name match.
+function pathEndsWith(sym, hint) {
+    const p = sym.path || sym.name;
+    return hint.includes('.') && p.length > hint.length && p.endsWith(`.${hint}`);
+}
+
 async function openWorkspace({ id, access, store = null, options = {} } = {}) {
     if (typeof id !== 'string' || !id) throw new Error('openWorkspace needs an id');
     for (const m of ['list', 'stat', 'read']) {
@@ -1827,7 +1834,10 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
             for (const s of f.symbols || []) inScope.push({ file: f, symbol: s });
         }
         const byPath = inScope.filter((h) => (h.symbol.path || h.symbol.name) === nameHint);
-        const hits = byPath.length ? byPath : inScope.filter((h) => h.symbol.name === nameHint);
+        // `User.GetName` names `App.User.GetName` too: a path is the whole
+        // nesting chain (namespaces, packages), and nobody types all of it.
+        const bySuffix = byPath.length ? byPath : inScope.filter((h) => pathEndsWith(h.symbol, nameHint));
+        const hits = bySuffix.length ? bySuffix : inScope.filter((h) => h.symbol.name === nameHint);
         if (!hits.length) {
             // A miss is where the caller gets stranded, so it has to say what
             // to do next: a FILE addressed as a symbol, and text that exists
@@ -1984,7 +1994,8 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
     function resolveSymbolInSnapshot(snapshot, nameHint) {
         const syms = snapshot.symbols || [];
         const byPath = syms.filter((s) => (s.path || s.name) === nameHint);
-        const hits = byPath.length ? byPath : syms.filter((s) => s.name === nameHint);
+        const bySuffix = byPath.length ? byPath : syms.filter((s) => pathEndsWith(s, nameHint));
+        const hits = bySuffix.length ? bySuffix : syms.filter((s) => s.name === nameHint);
         if (!hits.length) return { ok: false, reason: `no symbol named "${nameHint}" in ${snapshot.rel}` };
         if (hits.length > 1) {
             return {

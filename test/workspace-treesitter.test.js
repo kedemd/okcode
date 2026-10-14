@@ -68,6 +68,37 @@ const TS_SAMPLE = [
     '',
 ].join('\n');
 
+const JAVA_SAMPLE = [
+    'package sample;',
+    '',
+    '/** The user class. */',
+    'public class User {',
+    '    public String getName() {',
+    '        return "ok";',
+    '    }',
+    '}',
+    '',
+].join('\n');
+
+const CSHARP_SAMPLE = [
+    'namespace Sample {',
+    '    public class User {',
+    '        public string GetName() {',
+    '            return "ok";',
+    '        }',
+    '    }',
+    '}',
+    '',
+].join('\n');
+
+const C_SAMPLE = ['int add(int a, int b) {', '    return a + b;', '}', ''].join('\n');
+
+// `bar` is declared OUT-OF-LINE only (no in-class prototype) — a real
+// header would also forward-declare it, but that is already covered by
+// the analysis-treesitter.test.js extraction fixture; keeping it out here
+// avoids two `Box.bar` symbols in the SAME file (read()'s own ambiguity).
+const CPP_SAMPLE = ['class Box {', 'public:', '};', '', 'void Box::bar() { return; }', ''].join('\n');
+
 // Already broken on disk BEFORE any edit — the baseline itself carries a
 // syntax error. The guard must only refuse NEW diagnostics, so an edit that
 // does not add one must still be allowed (DESIGN §7's "repair path").
@@ -98,6 +129,10 @@ describe('workspace over localFs: tree-sitter languages', () => {
         w('sample.py', PY_SAMPLE);
         w('sample.rs', RUST_SAMPLE);
         w('sample.ts', TS_SAMPLE);
+        w('sample.java', JAVA_SAMPLE);
+        w('sample.cs', CSHARP_SAMPLE);
+        w('sample.c', C_SAMPLE);
+        w('sample.cpp', CPP_SAMPLE);
         w('already_broken.go', GO_ALREADY_BROKEN);
 
         const access = localFs(root);
@@ -118,7 +153,9 @@ describe('workspace over localFs: tree-sitter languages', () => {
         // Preload every grammar up front so this suite exercises the real
         // extractor, not the "runtime not yet loaded" fallback — the fallback
         // path is covered by analysis-treesitter.test.js's own test.
-        await Promise.all(['typescript', 'python', 'go', 'rust'].map((id) => treesitter.ensureLanguage(id)));
+        await Promise.all(
+            ['typescript', 'python', 'go', 'rust', 'java', 'csharp', 'c', 'cpp'].map((id) => treesitter.ensureLanguage(id)),
+        );
     });
 
     it('find/outline/read by symbol path works for .py, .go, .rs and .ts', async () => {
@@ -140,6 +177,27 @@ describe('workspace over localFs: tree-sitter languages', () => {
 
         const outline = await ws.outline('sample.go');
         assert.ok(outline.symbols.some((s) => s.path === 'Circle.Area'));
+    });
+
+    it('find/outline/read by symbol path works for .java, .cs, .c and .cpp', async () => {
+        const { ws } = await setup();
+
+        const javaHits = await ws.find('getName');
+        assert.ok(javaHits.some((h) => h.path === 'User.getName' && h.file === 'sample.java'), JSON.stringify(javaHits));
+        const javaRead = await ws.read('sample.java#User.getName');
+        assert.ok(javaRead.ok && javaRead.body.includes('return "ok"'));
+
+        const csRead = await ws.read('sample.cs#User.GetName');
+        assert.ok(csRead.ok && csRead.body.includes('return "ok"'));
+
+        const cRead = await ws.read('sample.c#add');
+        assert.ok(cRead.ok && cRead.body.includes('return a + b'));
+
+        const cppRead = await ws.read('sample.cpp#Box.bar');
+        assert.ok(cppRead.ok && cppRead.body.includes('return;'));
+
+        const outline = await ws.outline('sample.java');
+        assert.ok(outline.symbols.some((s) => s.path === 'User.getName'));
     });
 
     it('an edit introducing a NEW syntax error in a .go file is refused', async () => {

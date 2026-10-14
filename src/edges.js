@@ -152,11 +152,10 @@ function hasProjectTable(text) {
 }
 
 // composer.json IS plain JSON (unlike go.mod/Cargo.toml/pyproject.toml) —
-// just `autoload.psr-4`, the one table PHP resolution needs: NAMESPACE
-// PREFIX -> one directory or several, relative to this composer.json's
-// own folder. `autoload-dev` (test-only autoloading) is deliberately not
-// read here — the same "only what resolution needs" scope every other
-// config reader above keeps.
+// `autoload.psr-4` and `autoload-dev.psr-4`, the one table PHP resolution
+// needs: NAMESPACE PREFIX -> one directory or several, relative to this
+// composer.json's own folder. The dev table maps the tests, which are
+// indexed like any other code, so their classes resolve too.
 function psr4RootsFrom(dir, body) {
     const out = [];
     let json;
@@ -165,8 +164,9 @@ function psr4RootsFrom(dir, body) {
     } catch {
         return out; // malformed composer.json — no PSR-4 roots from it, not a crash
     }
-    const psr4 = (json && json.autoload && json.autoload['psr-4']) || {};
-    for (const [prefix, target] of Object.entries(psr4)) {
+    const table = (key) => (json && json[key] && json[key]['psr-4']) || {};
+    const entries = [...Object.entries(table('autoload')), ...Object.entries(table('autoload-dev'))];
+    for (const [prefix, target] of entries) {
         const normPrefix = prefix.endsWith('\\') ? prefix : `${prefix}\\`;
         for (const t of Array.isArray(target) ? target : [target]) {
             if (typeof t !== 'string') continue;

@@ -164,7 +164,7 @@ function registerChunker(db) {
     db.embeddings.registerChunkStrategy(chunk.STRATEGY, chunk.headedChunks);
 }
 
-async function openStore({ db, id, access, profiles = [], log = () => {} } = {}) {
+async function openStore({ db, id, access, profiles = [], fts: ftsMode = 'full', log = () => {} } = {}) {
     if (!db || typeof db.env !== 'function') throw new Error('openStore needs an open okdb instance (db)');
     if (!access || typeof access.read !== 'function') throw new Error('openStore needs the workspace access facade');
     const envName = envNameFor(id);
@@ -255,7 +255,25 @@ async function openStore({ db, id, access, profiles = [], log = () => {} } = {})
         }
     }
     const fts = await ensureFts(SYMBOLS, SYMBOL_FTS);
-    const contentFts = await ensureFts(FILES, CONTENT_FTS);
+    // `fts: 'symbols'` (DESIGN §5/§9) drops the full-text index over file
+    // CONTENT — a workspace that only ever needs names/doc/signature search
+    // keeps the (much bigger, over real source) content index from existing
+    // at all. The symbols FTS above is unaffected either way. Converging an
+    // existing env is symmetric: 'full' builds it if absent (ensureFts,
+    // above), 'symbols' drops it here if present — so flipping the option on
+    // a workspace that already has one takes effect on this very open, the
+    // same semantics reset({ scope: 'fts' }) already has for a rebuild.
+    let contentFts;
+    if (ftsMode === 'symbols') {
+        try {
+            if (db.fts.has(FILES, FTS_NAME, env)) await db.fts.drop(FILES, FTS_NAME, env).catch(() => {});
+        } catch {
+            /* nothing to converge on an okdb without the fts API */
+        }
+        contentFts = false;
+    } else {
+        contentFts = await ensureFts(FILES, CONTENT_FTS);
+    }
 
     // ── embeddings profiles ─────────────────────────────────────────────
     registerChunker(db);
@@ -472,6 +490,7 @@ async function openStore({ db, id, access, profiles = [], log = () => {} } = {})
         db,
         fts,
         contentFts,
+        ftsMode,
         FILES,
         SYMBOLS,
         PACKAGES,

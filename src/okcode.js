@@ -299,8 +299,8 @@ async function open({
         }
     }
 
-    async function openOne(id, access, options) {
-        const store = await openStore({ db, id, access, profiles: usableProfiles(), log: (m) => L.warn(m) });
+    async function openOne(id, access, options, fts) {
+        const store = await openStore({ db, id, access, profiles: usableProfiles(), fts, log: (m) => L.warn(m) });
         const ws = await openWorkspace({
             id,
             access,
@@ -314,7 +314,7 @@ async function open({
             if (!store.hasProfiles()) return innerAsk(query, opts); // its own "unavailable" error
             return innerAsk(query, { ...opts, profile: resolveProfile(opts.profile) });
         };
-        opened.set(id, { ws, store, access, options, index: 'full' });
+        opened.set(id, { ws, store, access, options, index: 'full', fts: store.ftsMode });
         return { ws, store };
     }
 
@@ -328,12 +328,21 @@ async function open({
         };
     }
 
-    async function addWorkspace(id, { access, options = {}, index = 'full' } = {}) {
+    async function addWorkspace(id, { access, options = {}, index = 'full', fts } = {}) {
         envNameFor(id); // validates the id
         if (!access || typeof access.read !== 'function')
             throw new Error(`addWorkspace("${id}") needs an access facade`);
         if (index !== 'full' && index !== 'none') {
             throw new Error(`addWorkspace("${id}"): index must be 'full' or 'none' (got ${JSON.stringify(index)})`);
+        }
+        // 'full' (default) keeps the content full-text index this workspace
+        // always had; 'symbols' never builds it (DESIGN §5/§9) — a workspace
+        // whose source is huge and whose questions are name-shaped. Falls
+        // back to open()'s `workspace` defaults, like every other workspace
+        // option, so a host need not repeat it per call.
+        const ftsMode = fts ?? (workspaceDefaults && workspaceDefaults.fts) ?? 'full';
+        if (ftsMode !== 'full' && ftsMode !== 'symbols') {
+            throw new Error(`addWorkspace("${id}"): fts must be 'full' or 'symbols' (got ${JSON.stringify(ftsMode)})`);
         }
         // An indexed workspace keeps its env and record; serving it unindexed
         // under the same id would hide both.
@@ -368,7 +377,7 @@ async function open({
             lastSync: (existing && existing.lastSync) || null,
             access: { kind: access.kind || null, root: typeof access.root === 'string' ? access.root : null },
         });
-        const { ws, store } = await openOne(id, access, options);
+        const { ws, store } = await openOne(id, access, options, ftsMode);
         // The open walk: cold → reads and parses everything; warm → one list
         // and a hash only for what moved since the rows were written.
         const t0 = Date.now();
@@ -579,7 +588,17 @@ async function open({
         };
         out.files = count(FILES);
         out.symbols = count(SYMBOLS);
-        out.fts = { symbols: ftsState(SYMBOLS, env), files: ftsState(FILES, env) };
+        const filesFts = ftsState(FILES, env);
+        // The mode is read off the open store when this process holds it
+        // (the source of truth — it is what decided whether to build or drop
+        // the content index on this very open); otherwise inferred from
+        // whether the content index exists at all, which is exactly what a
+        // passive process (no facade here) can see.
+        out.fts = {
+            mode: o && o.fts ? o.fts : filesFts.status === 'absent' ? 'symbols' : 'full',
+            symbols: ftsState(SYMBOLS, env),
+            files: filesFts,
+        };
 
         const storeProfiles = o ? new Map((await o.store.profiles()).map((sp) => [sp.name, sp])) : new Map();
         for (const p of profiles.values()) {
@@ -695,7 +714,7 @@ async function open({
             await o.ws.close().catch(() => {});
             opened.delete(id);
             await dropEnv(id, o.store);
-            const { ws, store } = await openOne(id, o.access, o.options);
+            const { ws, store } = await openOne(id, o.access, o.options, o.fts);
             const t0 = Date.now();
             const r = await ws.refresh();
             const res = syncResult(id, r, Date.now() - t0);

@@ -25,6 +25,10 @@ global flags
                            workspaces at one shared store with --store + --id.
   --id NAME                workspace id (default: "default" in <root>/.okcode;
                            the root's basename in a shared --store)
+  --fts full|symbols      full (default) also full-text indexes file CONTENT; symbols
+                           indexes only name/doc/signature — smaller, no file-text eye in
+                           code_find/code_ask (grep/mentions are unaffected: they scan the
+                           files directly when the content index is absent)
   --embedder-config FILE   embedder profiles (JSON: { "embedders": {...}, "active": "name" })
   --license FILE           install an okdb license into the store (the license file; its
                            activation token may follow on a second line). Idempotent.
@@ -267,7 +271,10 @@ async function openOkcode() {
 async function openWs() {
     const { okcode } = await openOkcode();
     if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) fail(`--root ${root} is not a directory`);
-    const ws = oc.workspace(wsId) || (await oc.addWorkspace(wsId, { access: okcode.access.localFs(root) }));
+    if (flags.fts !== undefined && flags.fts !== 'full' && flags.fts !== 'symbols') fail('--fts must be full or symbols');
+    const ws =
+        oc.workspace(wsId) ||
+        (await oc.addWorkspace(wsId, { access: okcode.access.localFs(root), ...(flags.fts ? { fts: flags.fts } : {}) }));
     return ws;
 }
 

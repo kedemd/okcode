@@ -429,7 +429,10 @@ function createTools({ workspace, workspaces = () => [], grepMaxChars = 12000 } 
             // own doc explains why): raising `limit` asks each eye to look
             // wider, it does not just slice a longer list that was already
             // computed.
-            (hits.truncated ? `\n  [top ${hits.length} match(es) — raise limit to search deeper]` : '')
+            (hits.truncated ? `\n  [top ${hits.length} match(es) — raise limit to search deeper]` : '') +
+            (hits.contentEyeSkipped
+                ? `\n  [${ws.id} is indexed fts: symbols — no file-text eye; names/doc/meaning only]`
+                : '')
         );
     }
 

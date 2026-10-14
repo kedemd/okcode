@@ -24,6 +24,9 @@ const oc = await okcode.open({
 // A local folder
 await oc.addWorkspace('app', { access: okcode.access.localFs('/home/me/app') });
 
+// A huge repo you only ever ask by name: skip the (bigger) content index
+await oc.addWorkspace('monorepo', { access: okcode.access.localFs('/home/me/monorepo'), fts: 'symbols' });
+
 // A remote folder — okcode supplies the scripts, you supply the transport
 await oc.addWorkspace('prod-api', {
     access: okcode.access.shell({

@@ -509,6 +509,10 @@ function signatureOf(src, contentStart, node, cfg) {
     let text = src
         .slice(contentStart, end)
         .replace(/\s+/g, ' ')
+        // A parameter list laid out one per line collapses to `( a, b, )`:
+        // close the gaps the line breaks left and drop the trailing comma.
+        .replace(/([([]) /g, '$1')
+        .replace(/,? ([)\]])/g, '$1')
         .trim()
         // The body's own opener (`{` for a block, `:` for Python) is what
         // stopped the slice above; trim it (and any space before it) so the

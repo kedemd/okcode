@@ -294,23 +294,23 @@ test('signature: the full definition up to its BODY, not just the first line —
     // `export` wraps the declaration one level up (see the typescript entry
     // in treesitter.js's LANGUAGES table) — the signature, like the
     // definition's span, starts at the function itself.
-    assert.equal(tsSym.signature, 'async function createUser( name: string, age: number, ): Promise<User>');
+    assert.equal(tsSym.signature, 'async function createUser(name: string, age: number): Promise<User>');
 
     const py = ['def create_user(', '    name,', '    age,', '):', '    return {name: name, age: age}', ''].join('\n');
     const pySym = extract('multi.py', py).symbols.find((s) => s.name === 'create_user');
-    assert.equal(pySym.signature, 'def create_user( name, age, )');
+    assert.equal(pySym.signature, 'def create_user(name, age)');
 
     const go = ['package main', '', 'func CreateUser(', '\tname string,', '\tage int,', ') string {', '\treturn name', '}', ''].join('\n');
     const goSym = extract('multi.go', go).symbols.find((s) => s.name === 'CreateUser');
-    assert.equal(goSym.signature, 'func CreateUser( name string, age int, ) string');
+    assert.equal(goSym.signature, 'func CreateUser(name string, age int) string');
 
     const rust = ['pub fn create_user(', '    name: String,', '    age: i32,', ') -> String {', '    name', '}', ''].join('\n');
     const rustSym = extract('multi.rs', rust).symbols.find((s) => s.name === 'create_user');
-    assert.equal(rustSym.signature, 'pub fn create_user( name: String, age: i32, ) -> String');
+    assert.equal(rustSym.signature, 'pub fn create_user(name: String, age: i32) -> String');
 
     const php = ['<?php', 'function createUser(', '    string $name,', '    int $age', ') {', '    return $name;', '}', ''].join('\n');
     const phpSym = extract('multi.php', php).symbols.find((s) => s.name === 'createUser');
-    assert.equal(phpSym.signature, 'function createUser( string $name, int $age )');
+    assert.equal(phpSym.signature, 'function createUser(string $name, int $age)');
 });
 
 test('signature: no body (an interface method, a bare declaration) is the whole node up to `;`/end', () => {

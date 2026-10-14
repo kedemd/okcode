@@ -979,7 +979,13 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
     // Where does this TEXT appear, for a caller who asked for it as a symbol
     // and was wrong? Deliberately cheap and literal — this exists to turn a
     // dead end into a next step, not to compete with find().
-    async function mentionsOf(text, limit = 3) {
+    // Every candidate's text is already loaded by ensureTexts just below, so
+    // finishing the scan costs nothing the caller was not already paying for
+    // — it no longer stops at `limit` partway through, which used to leave
+    // the TOTAL unknowable (and the stop order was file-list order, not
+    // ranked by anything). One hit per file (the first occurrence); paging
+    // over the full list happens in mentions(), same as refs().
+    async function mentionsOf(text) {
         const needle = String(text).toLowerCase();
         if (needle.length < 2) return [];
         // Withheld files stay withheld: an address is a lead even without
@@ -992,7 +998,6 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
             const at = f.content.toLowerCase().indexOf(needle);
             if (at < 0) continue;
             out.push({ rel: f.rel, line: f.content.slice(0, at).split('\n').length });
-            if (out.length >= limit) break;
         }
         return out;
     }
@@ -1403,16 +1408,21 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
     // `by: 'section'`, each piece addressed by range — a heading by its title
     // too, unless another heading has the same one. null for code, which
     // falls back to chunks.
-    function sectionsOutline(rel, text, limit) {
+    function sectionsOutline(rel, text, limit, offset = 0) {
         const all = textRegions(rel, text);
         if (!all || !all.length) return null;
         const seen = new Map();
         for (const g of all) if (g.kind === 'heading') seen.set(g.title, (seen.get(g.title) || 0) + 1);
+        const off = Number(offset) > 0 ? Math.floor(Number(offset)) : 0;
+        const page = all.slice(off, off + limit);
+        const truncated = off + page.length < all.length;
         return {
             by: 'section',
             total: all.length,
-            truncated: all.length > limit,
-            symbols: all.slice(0, limit).map((g) => ({
+            offset: off,
+            truncated,
+            next: truncated ? off + page.length : null,
+            symbols: page.map((g) => ({
                 name: g.title,
                 path: g.kind === 'heading' && seen.get(g.title) === 1 ? `${rel}#${g.title}` : `${rel}:${g.lineStart}-${g.lineEnd}`,
                 kind: g.kind,
@@ -1431,8 +1441,9 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
     // chunks), parsed in memory from one direct read. A DIRECTORY: the
     // subtree's files with their top-level symbols, from scanLibrary — the
     // map of a package nobody indexed, for choosing what to read.
-    async function outlineLibrary(lib, limit) {
+    async function outlineLibrary(lib, limit, offset = 0) {
         if (lib.error) return { ok: false, reason: lib.error };
+        const off = Number(offset) > 0 ? Math.floor(Number(offset)) : 0;
         const one = await libraryFile(lib.rel);
         if (one.ok) {
             let syms = [];
@@ -1444,12 +1455,16 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
             const lines = one.text.split('\n');
             const head = { ok: true, library: true, file: one.rel, lines: lines.length, at: one.at };
             if (syms.length) {
+                const page = syms.slice(off, off + limit);
+                const truncated = off + page.length < syms.length;
                 return {
                     ...head,
                     by: 'symbol',
                     total: syms.length,
-                    truncated: syms.length > limit,
-                    symbols: syms.slice(0, limit).map((x) => ({
+                    offset: off,
+                    truncated,
+                    next: truncated ? off + page.length : null,
+                    symbols: page.map((x) => ({
                         name: x.name,
                         path: x.path || x.name,
                         kind: x.kind,
@@ -1462,7 +1477,7 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
                     })),
                 };
             }
-            const sections = sectionsOutline(one.rel, one.text, limit);
+            const sections = sectionsOutline(one.rel, one.text, limit, off);
             if (sections) return { ...head, ...sections };
             const before = (n) => one.text.slice(0, n).split('\n').length;
             const cut = [];
@@ -1474,12 +1489,16 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
                 }
             }
             const pieces = labelPieces(cut, lines);
+            const page = pieces.slice(off, off + limit);
+            const truncated = off + page.length < pieces.length;
             return {
                 ...head,
                 by: 'chunk',
                 total: pieces.length,
-                truncated: pieces.length > limit,
-                symbols: pieces.slice(0, limit).map((p) => ({
+                offset: off,
+                truncated,
+                next: truncated ? off + page.length : null,
+                symbols: page.map((p) => ({
                     name: p.name,
                     path: `${one.rel}:${p.lineStart}-${p.lineEnd}`,
                     kind: 'chunk',
@@ -1499,19 +1518,22 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
         } catch (err) {
             return { ok: false, reason: String((err && err.message) || err) };
         }
+        const filesTruncated = off + Math.min(limit, Math.max(0, scan.files.length - off)) < scan.files.length;
         return {
             ok: true,
             library: true,
             by: 'files',
             dir: lib.rel || '.',
             total: scan.files.length,
+            offset: off,
             lines: scan.files.reduce((n, f) => n + (f.lines || 0), 0),
             symbolCount: scan.files.reduce((n, f) => n + f.symbols.length, 0),
             // The parse cap (opts.libraryParseFiles) stopped the listing.
             capped: scan.truncated,
             cap: opts.libraryParseFiles,
-            truncated: scan.files.length > limit,
-            entries: scan.files.slice(0, limit).map((f) => ({
+            truncated: filesTruncated,
+            next: filesTruncated ? off + Math.min(limit, Math.max(0, scan.files.length - off)) : null,
+            entries: scan.files.slice(off, off + limit).map((f) => ({
                 file: f.rel,
                 lines: f.lines,
                 lang: f.lang,
@@ -2328,8 +2350,13 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
         // Name match first (exact, then prefix/substring), then the doc prose,
         // which in a well-commented codebase answers "where is X handled"
         // better than a name search does; then file content, attributed to
-        // the symbol containing each matched line.
-        async find(query, { kind = null, limit = 20, path = null } = {}, _retried = false) {
+        // the symbol containing each matched line. Ranked FIRST, over every
+        // hit, THEN paged (`offset`, like refs()/mentions()): the returned
+        // array carries `total` (exact), `truncated`, `offset` and `next`.
+        // A `path`-scoped search inherits this except where noted at each
+        // branch below (a library-path lookup same as above; a project-path
+        // filter's `total` can itself be `capped` — see there).
+        async find(query, { kind = null, limit = 20, offset = 0, path = null } = {}, _retried = false) {
             const q = String(query).toLowerCase();
             // ONE scoring rule for every hit, whatever index produced it. An
             // exact name match is an exact name match whether full-text
@@ -2378,14 +2405,36 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
                             });
                         }
                     }
-                    const res = hits.sort((a, b) => b.score - a.score || a.span - b.span).slice(0, limit);
+                    const sorted = hits.sort((a, b) => b.score - a.score || a.span - b.span);
+                    const off = Number(offset) > 0 ? Math.floor(Number(offset)) : 0;
+                    const res = sorted.slice(off, off + limit);
+                    res.total = sorted.length;
+                    res.offset = off;
+                    res.truncated = off + res.length < sorted.length;
+                    res.next = res.truncated ? off + res.length : null;
                     res.library = { path: lib.rel, files: scan.files.length, truncated: scan.truncated, ...(scan.missing ? { missing: true } : {}) };
                     return res;
                 }
                 const inPath = pathMatcher({ paths: [path] });
                 if (inPath) {
-                    const all = await api.find(query, { kind, limit: Math.max(limit * 5, 100) }, _retried);
-                    return all.filter((h) => inPath(h.file)).slice(0, limit);
+                    // The inner call is widened, not just by `limit`: a path
+                    // filter can throw away most of what it fetches, and a
+                    // narrow inner window would silently starve this of hits
+                    // that exist further down the unfiltered ranking.
+                    const off = Number(offset) > 0 ? Math.floor(Number(offset)) : 0;
+                    const inner = await api.find(query, { kind, limit: Math.max((off + limit) * 5, 200) }, _retried);
+                    const filtered = inner.filter((h) => inPath(h.file));
+                    const res = filtered.slice(off, off + limit);
+                    res.total = filtered.length;
+                    res.offset = off;
+                    // The inner fetch is itself a cap: when IT was truncated,
+                    // `filtered.length` is only what the inner window held,
+                    // not the whole workspace's — `capped` says this total is
+                    // a floor, not an exhaustive count.
+                    res.capped = !!inner.truncated;
+                    res.truncated = off + res.length < filtered.length || res.capped;
+                    res.next = res.truncated ? off + res.length : null;
+                    return res;
                 }
             }
             // A symbol found by both indexes is ONE hit: the better score
@@ -2533,17 +2582,23 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
             }
             // Tier first (how the query matched), then full-text relevance
             // inside the tier, then the smaller symbol.
-            const results = [...out.values()]
-                .sort((a, b) => b.score - a.score || (b.relevance || 0) - (a.relevance || 0) || a.span - b.span)
-                .slice(0, limit);
+            const ranked = [...out.values()].sort(
+                (a, b) => b.score - a.score || (b.relevance || 0) - (a.relevance || 0) || a.span - b.span,
+            );
+            const off = Number(offset) > 0 ? Math.floor(Number(offset)) : 0;
+            const results = ranked.slice(off, off + limit);
             // RESULT-SET CHECK: this additionally catches a file a symbol hit
             // still points at but that has since been deleted (or whose
             // symbols moved), and re-runs once.
             if (!_retried && results.length) {
                 if ((await resultSetCheck(results.map((h) => h.file))).changed) {
-                    return api.find(query, { kind, limit }, true);
+                    return api.find(query, { kind, limit, offset }, true);
                 }
             }
+            results.total = ranked.length;
+            results.offset = off;
+            results.truncated = off + results.length < ranked.length;
+            results.next = results.truncated ? off + results.length : null;
             return results;
         },
 
@@ -2637,7 +2692,18 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
             // Lexical certainty first, then semantic proximity. A name match is
             // knowledge; a vector hit is a good guess, and mixing the two
             // rankings would let a guess outrank the thing itself.
-            return out.sort((a, b) => b.score - a.score || (b.relevance || 0) - (a.relevance || 0)).slice(0, limit);
+            const sorted = out.sort((a, b) => b.score - a.score || (b.relevance || 0) - (a.relevance || 0));
+            const results = sorted.slice(0, limit);
+            // Not paged like find()/refs(): both eyes feeding `out` were
+            // themselves already asked for only `limit`-ish candidates (the
+            // semantic eye for `max(8, limit)`, the lexical eye for `limit`),
+            // so `sorted.length` is not a true count of everything that COULD
+            // match — raising it changes what each eye looked at, not just
+            // what gets sliced off the same list. Top-K by design, said as
+            // one: no false `total`, just whether this call's own K was hit.
+            results.topK = true;
+            results.truncated = sorted.length > limit;
+            return results;
         },
 
         // ── cheap listings (rows only) ──────────────────────────────────
@@ -2655,13 +2721,14 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
         // read()/outline() verify and hand out the `at` an edit needs.
 
         // [{ file, size, lines, lang, symbols, indexed, hash }] under `dir`.
-        async files({ dir = null, lang = null, limit = 0, stat = false } = {}) {
+        async files({ dir = null, lang = null, limit = 0, offset = 0, stat = false } = {}) {
             // A directory, not a string prefix: `lib` lists lib/, not libs/.
             const d = String(dir || '')
                 .replace(/\\/g, '/')
                 .replace(/^\.(\/|$)/, '')
                 .replace(/^\/+|\/+$/g, '');
             const prefix = d ? `${d}/` : null;
+            const off = Number(offset) > 0 ? Math.floor(Number(offset)) : 0;
             // Unindexed: a fresh listing (one facade call) — no rows, so no
             // line or symbol counts.
             if (unindexed) {
@@ -2670,7 +2737,7 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
                 const listed = await listLibrary([lib.rel], Math.max(1, opts.libraryFiles));
                 let all = listed.rows.filter((r) => !lang || langOf(r.rel) === lang);
                 const total = all.length;
-                if (limit > 0) all = all.slice(0, limit);
+                if (limit > 0 || off) all = all.slice(off, limit > 0 ? off + limit : undefined);
                 const rows = all.map((r) => ({
                     file: r.rel,
                     size: r.size == null ? null : r.size,
@@ -2680,7 +2747,17 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
                     indexed: false,
                     hash: null,
                 }));
-                return { id, dir: prefix, total, truncated: rows.length < total || listed.truncated, asOf: Date.now(), files: rows };
+                const truncated = off + rows.length < total || listed.truncated;
+                return {
+                    id,
+                    dir: prefix,
+                    total,
+                    offset: off,
+                    truncated,
+                    next: truncated ? off + rows.length : null,
+                    asOf: Date.now(),
+                    files: rows,
+                };
             }
             await ensureOpen();
             let all = list()
@@ -2688,7 +2765,7 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
                 .filter((f) => !lang || f.lang === lang)
                 .sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
             const total = all.length;
-            if (limit > 0) all = all.slice(0, limit);
+            if (limit > 0 || off) all = all.slice(off, limit > 0 ? off + limit : undefined);
             const rows = all.map((f) => ({
                 file: f.rel,
                 size: f.size == null ? null : f.size,
@@ -2699,7 +2776,17 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
                 hash: f.hash || null,
             }));
             if (stat) await flagMoved(rows);
-            return { id, dir: prefix, total, truncated: rows.length < total, asOf: lastScanAt || null, files: rows };
+            const truncated = off + rows.length < total;
+            return {
+                id,
+                dir: prefix,
+                total,
+                offset: off,
+                truncated,
+                next: truncated ? off + rows.length : null,
+                asOf: lastScanAt || null,
+                files: rows,
+            };
         },
 
         // One file's SYMBOL TABLE from the stored rows: name, path, kind,
@@ -2707,7 +2794,7 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
         // outline(): no text is read, so no regions (an extension's
         // template/style pieces) and no chunk fallback for a file without
         // symbols — outline() carves those from the text.
-        async symbols(filePath, { limit = 0, kind = null, stat = false } = {}) {
+        async symbols(filePath, { limit = 0, offset = 0, kind = null, stat = false } = {}) {
             if (unindexed) return { ok: false, code: 'OKCODE_NOT_INDEXED', reason: notIndexed('symbols()').message };
             await ensureOpen();
             const f = fileOf(filePath);
@@ -2729,7 +2816,9 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
             }
             let syms = (f.symbols || []).filter((s) => !kind || s.kind === kind);
             const total = syms.length;
-            if (limit > 0) syms = syms.slice(0, limit);
+            const off = Number(offset) > 0 ? Math.floor(Number(offset)) : 0;
+            if (limit > 0 || off) syms = syms.slice(off, limit > 0 ? off + limit : undefined);
+            const truncated = off + syms.length < total;
             const out = {
                 ok: true,
                 file: f.rel,
@@ -2740,7 +2829,9 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
                 hash: f.hash || null,
                 asOf: lastScanAt || null,
                 total,
-                truncated: syms.length < total,
+                offset: off,
+                truncated,
+                next: truncated ? off + syms.length : null,
                 symbols: syms.map((s) => ({
                     name: s.name,
                     path: s.path || s.name,
@@ -2770,9 +2861,10 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
         // to a coin flip; asking it of twenty-odd named pieces is a filter,
         // and only the survivors cost a body read. Verified first, and the
         // `at` comes back with it.
-        async outline(filePath, { limit = 80 } = {}) {
+        async outline(filePath, { limit = 80, offset = 0 } = {}) {
+            const off = Number(offset) > 0 ? Math.floor(Number(offset)) : 0;
             const lib = libraryPath(filePath);
-            if (lib) return outlineLibrary(lib, limit);
+            if (lib) return outlineLibrary(lib, limit, off);
             await ensureOpen();
             const f = fileOf(filePath);
             if (!f) return { ok: false, reason: await explainTarget(filePath) };
@@ -2795,26 +2887,32 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
             }
             const syms = fresh.symbols || [];
             const max = opts.outlineMaxLines;
-            const piecesOut = (by, flat, mapKind) => ({
-                ok: true,
-                file: fresh.rel,
-                lines: fresh.lines,
-                at: fresh.hash,
-                by,
-                total: flat.length,
-                truncated: flat.length > limit,
-                symbols: flat.slice(0, limit).map((p) => ({
-                    name: p.name,
-                    path: `${fresh.rel}:${p.lineStart}-${p.lineEnd}`,
-                    kind: mapKind(p),
-                    parent: null,
-                    lineStart: p.lineStart,
-                    lineEnd: p.lineEnd,
-                    span: Math.max(1, p.lineEnd - p.lineStart + 1),
-                    signature: null,
-                    doc: p.doc,
-                })),
-            });
+            const piecesOut = (by, flat, mapKind) => {
+                const page = flat.slice(off, off + limit);
+                const truncated = off + page.length < flat.length;
+                return {
+                    ok: true,
+                    file: fresh.rel,
+                    lines: fresh.lines,
+                    at: fresh.hash,
+                    by,
+                    total: flat.length,
+                    offset: off,
+                    truncated,
+                    next: truncated ? off + page.length : null,
+                    symbols: page.map((p) => ({
+                        name: p.name,
+                        path: `${fresh.rel}:${p.lineStart}-${p.lineEnd}`,
+                        kind: mapKind(p),
+                        parent: null,
+                        lineStart: p.lineStart,
+                        lineEnd: p.lineEnd,
+                        span: Math.max(1, p.lineEnd - p.lineStart + 1),
+                        signature: null,
+                        doc: p.doc,
+                    })),
+                };
+            };
             // An EXTENSION's structural regions, when there are any, are
             // checked BEFORE symbol count: an okjs file carries exactly one
             // coarse symbol (the component tag), which would otherwise hide
@@ -2849,7 +2947,7 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
                 const src = String((await textOfFresh(fresh.path)) || '');
                 // A document (markdown, prose, JSON, a log): its titled
                 // sections. Code without symbols: chunks, below.
-                const sections = sectionsOutline(fresh.rel, src, limit);
+                const sections = sectionsOutline(fresh.rel, src, limit, off);
                 if (sections) return { ok: true, file: fresh.rel, lines: fresh.lines, at: fresh.hash, ...sections };
                 const before = (n) => src.slice(0, n).split('\n').length;
                 const all = src.split('\n');
@@ -2869,39 +2967,55 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
                 }
                 return piecesOut('chunk', labelPieces(cut, all), () => 'chunk');
             }
-            return {
-                ok: true,
-                file: fresh.rel,
-                lines: fresh.lines,
-                at: fresh.hash,
-                by: 'symbol',
-                total: syms.length,
-                truncated: syms.length > limit,
-                symbols: syms.slice(0, limit).map((s) => ({
-                    name: s.name,
-                    path: s.path || s.name,
-                    kind: s.kind,
-                    parent: s.parent || null,
-                    lineStart: s.lineStart,
-                    lineEnd: s.lineEnd,
-                    span: s.lineEnd - s.lineStart + 1,
-                    signature: s.signature || null,
-                    doc: s.doc ? String(s.doc).slice(0, 200) : null,
-                })),
-            };
+            {
+                const page = syms.slice(off, off + limit);
+                const truncated = off + page.length < syms.length;
+                return {
+                    ok: true,
+                    file: fresh.rel,
+                    lines: fresh.lines,
+                    at: fresh.hash,
+                    by: 'symbol',
+                    total: syms.length,
+                    offset: off,
+                    truncated,
+                    next: truncated ? off + page.length : null,
+                    symbols: page.map((s) => ({
+                        name: s.name,
+                        path: s.path || s.name,
+                        kind: s.kind,
+                        parent: s.parent || null,
+                        lineStart: s.lineStart,
+                        lineEnd: s.lineEnd,
+                        span: s.lineEnd - s.lineStart + 1,
+                        signature: s.signature || null,
+                        doc: s.doc ? String(s.doc).slice(0, 200) : null,
+                    })),
+                };
+            }
         },
 
         // Is this EXACT text anywhere in the workspace? The cheapest question,
         // and the one a "did my edit actually land" check needs: a CSS class
         // or an attribute value is not a symbol. RESULT-SET CHECK: only the
         // files about to back a hit are stat-checked; a change re-runs once.
-        async mentions(text, { limit = 5 } = {}, _retried = false) {
+        // Paged like refs(): `total`/`truncated`/`offset`/`next` on the
+        // returned array — the full scan already ran (mentionsOf), so the
+        // total is exact.
+        async mentions(text, { limit = 5, offset = 0 } = {}, _retried = false) {
             if (unindexed) throw notIndexed('mentions()');
             await ensureOpen();
-            const hits = await mentionsOf(text, limit);
+            const all = await mentionsOf(text);
+            const off = Number(offset) > 0 ? Math.floor(Number(offset)) : 0;
+            const n = Number(limit) > 0 ? Math.floor(Number(limit)) : 5;
+            const hits = all.slice(off, off + n);
             if (!_retried && hits.length && (await resultSetCheck(hits.map((h) => h.rel))).changed) {
-                return api.mentions(text, { limit }, true);
+                return api.mentions(text, { limit, offset }, true);
             }
+            hits.total = all.length;
+            hits.offset = off;
+            hits.truncated = off + hits.length < all.length;
+            hits.next = hits.truncated ? off + hits.length : null;
             return hits;
         },
 
@@ -2955,7 +3069,7 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
         // that matches a directory takes its subtree). Metadata only — no
         // file is read. Before the index is ready, answered from the
         // facade's listing (`via: 'direct'`, no line counts).
-        async glob(pattern, { limit = 0 } = {}) {
+        async glob(pattern, { limit = 0, offset = 0 } = {}) {
             const pats = [].concat(pattern == null ? [] : pattern).filter((p) => typeof p === 'string' && p.trim());
             if (!pats.length) return { ok: false, reason: 'glob needs a pattern, e.g. "src/**/*.js" or "*.test.js"' };
             const m = pathMatcher({ glob: pats });
@@ -2990,14 +3104,18 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
             }
             rows = rows.filter((r) => !m || m(r.file)).sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0));
             const total = rows.length;
+            const off = Number(offset) > 0 ? Math.floor(Number(offset)) : 0;
             const n = Number(limit) > 0 ? Math.floor(Number(limit)) : 0;
-            if (n) rows = rows.slice(0, n);
+            rows = off || n ? rows.slice(off, n ? off + n : undefined) : rows;
+            const truncated = off + rows.length < total;
             return {
                 ok: true,
                 id,
                 pattern: pats,
                 total,
-                truncated: rows.length < total,
+                offset: off,
+                truncated,
+                next: truncated ? off + rows.length : null,
                 via: ready ? 'index' : 'direct',
                 files: rows,
             };
@@ -3019,19 +3137,33 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
         // walk — DESIGN §12/WORKPLAN F3) lands on that exact line. Existing
         // fields are unchanged; `confidence` still exists (now carrying the
         // same value as `label`, kept for callers already matching on it).
-        async refs(query, { limit = 40, includeSelf = false } = {}, _retried = false) {
+        // Returns the page as a plain array with `total` (exact — the full
+        // scan runs before anything is cut, so a ranked-best hit is never
+        // dropped for one further down the file list), `offset`, `truncated`
+        // and `next` (the offset that continues it, or `null` at the end) —
+        // same shape as `files()`/`symbols()`/`glob()`. `capped`/`atLeast`
+        // replace `total` only in the pathological case the raw scan itself
+        // had to stop (see `rawCap` below): then the number is a floor, said
+        // as one, not reported as exact.
+        async refs(query, { limit = 40, offset = 0, includeSelf = false } = {}, _retried = false) {
             if (unindexed) throw notIndexed('finding uses');
             await ensureOpen();
             // isSecret as well as the flag: a store written under older rules
             // can still hold `indexed: true` for a file that must not be read.
             await ensureTexts(list().filter((f) => f.indexed !== false && !isSecret(f.path)));
             const q = String(query);
-            // The ranking needs the WHOLE universe before it can sort, so
-            // this no longer stops at `limit` while scanning — only a much
-            // larger hard cap, to keep one query from reading every line of
-            // an enormous workspace. `limit` still bounds what is RETURNED.
-            const hardCap = Math.max(limit * 20, 400);
+            // The ranking needs the WHOLE universe before it can sort — a cap
+            // that stopped the SCAN in path order, before local/imported hits
+            // even got a chance to rank, could throw away the best hits while
+            // keeping worse ones. Texts are already in memory (ensureTexts,
+            // above), so the scan itself is not the expensive part; only a
+            // pathological query (a single common character, hit on most
+            // lines of a huge tree) needs a floor under it at all, and that
+            // floor is reported (`capped`), never a silent truncation of the
+            // universe the ranking then sorts over.
+            const rawCap = 50000;
             const raw = [];
+            let scanCapped = false;
             outer: for (const f of list()) {
                 if (f.indexed === false || isSecret(f.path) || typeof f.content !== 'string') continue;
                 const lines = f.content.split('\n');
@@ -3042,7 +3174,10 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
                     // The declaration itself is not a use of itself.
                     if (!includeSelf && owner && owner.name === q && owner.lineStart === ln) continue;
                     raw.push({ f, ln, owner, text: lines[i].trim().slice(0, 160) });
-                    if (raw.length >= hardCap) break outer;
+                    if (raw.length >= rawCap) {
+                        scanCapped = true;
+                        break outer;
+                    }
                 }
             }
             await edges.ensure(list(), generation);
@@ -3100,11 +3235,31 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
             // them in.
             const rank = { local: 0, imported: 1, textual: 2 };
             out.sort((a, b) => rank[a.label] - rank[b.label]);
-            const limited = out.slice(0, limit);
-            if (!_retried && limited.length && (await resultSetCheck(limited.map((h) => h.file))).changed) {
-                return api.refs(query, { limit, includeSelf }, true);
+            // Paging over the RANKED list, like ws.grep()'s own page/offset
+            // (DESIGN §9): `offset` is a position in `out`, not in the raw
+            // scan, so a page always lands on the same ranked hits however
+            // many times it is asked for.
+            const off = Number(offset) > 0 ? Math.floor(Number(offset)) : 0;
+            const n = Number(limit) > 0 ? Math.floor(Number(limit)) : 40;
+            const page = out.slice(off, off + n);
+            if (!_retried && page.length && (await resultSetCheck(page.map((h) => h.file))).changed) {
+                return api.refs(query, { limit, offset, includeSelf }, true);
             }
-            return limited;
+            // `total` is exact unless the raw scan itself hit `rawCap`, in
+            // which case the ranking ran over a PARTIAL universe and the
+            // honest number is "at least this many", not a total — never
+            // reported as if it were exact (no-silent-cuts).
+            page.offset = off;
+            page.capped = scanCapped;
+            if (scanCapped) {
+                page.total = null;
+                page.atLeast = out.length;
+            } else {
+                page.total = out.length;
+            }
+            page.truncated = scanCapped || off + page.length < out.length;
+            page.next = page.truncated ? off + page.length : null;
+            return page;
         },
 
         // ── importers ──────────────────────────────────────────────────
@@ -3115,7 +3270,7 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
         // a component's TAG is an importer of the file defining that
         // component (F4 item 3: "who uses <setting-group>" is a resolved
         // ref, not a grep for the tag string).
-        async importers(file, { limit = 40 } = {}) {
+        async importers(file, { limit = 40, offset = 0 } = {}) {
             if (unindexed) throw notIndexed('finding importers');
             await ensureOpen();
             const f = fileOf(file);
@@ -3124,7 +3279,19 @@ async function openWorkspace({ id, access, store = null, options = {} } = {}) {
             const hits = edges
                 .importersOf(f.rel)
                 .map((e) => ({ file: e.file, line: e.line, kind: e.kind, names: e.names, via: e.via || null }));
-            return { ok: true, file: f.rel, total: hits.length, truncated: hits.length > limit, importers: hits.slice(0, limit) };
+            const off = Number(offset) > 0 ? Math.floor(Number(offset)) : 0;
+            const n = Number(limit) > 0 ? Math.floor(Number(limit)) : 40;
+            const page = hits.slice(off, off + n);
+            const truncated = off + page.length < hits.length;
+            return {
+                ok: true,
+                file: f.rel,
+                total: hits.length,
+                offset: off,
+                truncated,
+                next: truncated ? off + page.length : null,
+                importers: page,
+            };
         },
 
         // ── read ────────────────────────────────────────────────────────

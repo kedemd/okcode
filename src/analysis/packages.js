@@ -242,11 +242,17 @@ async function readPackages(access, names, sourceOf = () => 'transitive') {
         }
     }
     for (const pkg of packages.values()) {
-        pkg.surface = [...new Set(pkg.surface)].slice(0, 500);
+        const surfaceAll = [...new Set(pkg.surface)];
         // Deduped BEFORE the cap, and generous: a package's whole surface is
-        // a few hundred short strings, and truncating it is how a lookup
-        // answers "no" about something that is there.
-        pkg.members = [...new Set(pkg.members || [])].slice(0, 1500);
+        // a few hundred short strings, so this should never fire for a real
+        // one — but "should never" is not "never", and a cut lookup answering
+        // "no" about a name that IS there must say the cap, not the dep,
+        // decided that (surfaceTruncated/membersTruncated, below).
+        const membersAll = [...new Set(pkg.members || [])];
+        pkg.surface = surfaceAll.slice(0, 500);
+        pkg.members = membersAll.slice(0, 1500);
+        if (surfaceAll.length > pkg.surface.length) pkg.surfaceTruncated = true;
+        if (membersAll.length > pkg.members.length) pkg.membersTruncated = true;
     }
     return packages;
 }

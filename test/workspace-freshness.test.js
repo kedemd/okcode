@@ -82,7 +82,11 @@ for (const fac of facades()) {
                 ['a.js'],
             );
             write('a.js', 'function a() { return 42; }\nmodule.exports = { a };\n');
-            assert.deepEqual(await ws.mentions('return 1'), [], 'the result-set check caught the change and re-ran');
+            assert.deepEqual(
+                [...(await ws.mentions('return 1'))],
+                [],
+                'the result-set check caught the change and re-ran',
+            );
             assert.deepEqual(
                 (await ws.mentions('return 42')).map((m) => m.rel),
                 ['a.js'],
@@ -105,13 +109,13 @@ for (const fac of facades()) {
             assert.equal((await ws.mentions('return 2')).length, 1);
             fs.unlinkSync(path.join(root, 'b.js'));
             assert.equal((await ws.readFile('b.js')).ok, false);
-            assert.deepEqual(await ws.mentions('return 2'), []);
+            assert.deepEqual([...(await ws.mentions('return 2'))], []);
         });
 
         it('a brand-new external file appears only after sync(), which walks exactly once', async () => {
             const { ws, c, write } = await fixture();
             write('c.js', 'function c() { return 3; }\nmodule.exports = { c };\n');
-            assert.deepEqual(await ws.mentions('return 3'), []);
+            assert.deepEqual([...(await ws.mentions('return 3'))], []);
             assert.equal((await ws.readFile('c.js')).ok, false);
             assert.equal(c.counts.list, 0);
             await ws.sync();

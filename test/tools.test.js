@@ -111,6 +111,33 @@ describe('tools', () => {
         assert.match(none, /no definitions found/);
     });
 
+    it('code_find: a cut page ends with an exact offset= continuation, never a silent truncation', async () => {
+        const { tools, id } = await setup({
+            extra: (root) => {
+                for (let i = 0; i < 4; i++) {
+                    fs.writeFileSync(
+                        path.join(root, `dup${i}.js`),
+                        `function dupSymbol() { return ${i}; }\nmodule.exports = { dupSymbol };\n`,
+                    );
+                }
+            },
+        });
+        const page1 = await tools.render('code_find', { workspace: id, query: 'dupSymbol', limit: 2 });
+        assert.match(page1, /showing 2 of \d+ — continue with offset=2/);
+        const seen = new Set((page1.match(/dup\d\.js/g) || []));
+        let offset = 2;
+        let page = page1;
+        while (/continue with offset=/.test(page)) {
+            page = await tools.render('code_find', { workspace: id, query: 'dupSymbol', limit: 2, offset });
+            for (const f of page.match(/dup\d\.js/g) || []) seen.add(f);
+            const m = /continue with offset=(\d+)/.exec(page);
+            offset = m ? Number(m[1]) : null;
+            if (offset == null) break;
+        }
+        assert.equal(seen.size, 4, 'every duplicate-named definition reached across pages');
+        assert.ok(!/continue with offset=/.test(page), 'the last page names no further continuation');
+    });
+
     it('code_grep: exact text → file:line; absence is stated plainly', async () => {
         const { tools } = await setup();
         const out = await tools.render('code_grep', { text: 'TAX_RATE = 0.17' });
@@ -129,6 +156,17 @@ describe('tools', () => {
         assert.match(out, /bump/);
         const miss = await tools.render('code_outline', { file: 'lib/nope.js' });
         assert.match(miss, /^\(code_outline "lib\/nope\.js"\) — /);
+    });
+
+    it('code_outline: a cut page ends with offset= continuation, not just a truncated count', async () => {
+        const { tools } = await setup();
+        const full = await tools.render('code_outline', { file: 'lib/factory.js' });
+        const totalPieces = (full.match(/^\s+\d+L\s/gm) || []).length;
+        assert.ok(totalPieces > 1, 'fixture needs more than one piece to page over');
+        const page1 = await tools.render('code_outline', { file: 'lib/factory.js', limit: 1 });
+        assert.match(page1, new RegExp(`showing 1 from offset 0 — continue with offset=1`));
+        const page2 = await tools.render('code_outline', { file: 'lib/factory.js', limit: 1, offset: 1 });
+        assert.ok(!/continue with offset=/.test(page2) || totalPieces > 2, 'eventually the pages run out');
     });
 
     it('code_read: symbol, qualified symbol, range, absolute path; misses are sentences', async () => {
@@ -158,6 +196,28 @@ describe('tools', () => {
         assert.match(all, /dependencies of/);
         const miss = await tools.render('code_package', { name: 'nope-pkg' });
         assert.match(miss, /\(code_package nope-pkg\) — /);
+    });
+
+    it('code_package: a surface/members cap that fires is reported in the rendered text', async () => {
+        const names = Array.from({ length: 520 }, (_, i) => `name${i}`);
+        const { tools } = await setup({
+            extra: (root) => {
+                fs.mkdirSync(path.join(root, 'node_modules/big'), { recursive: true });
+                fs.writeFileSync(
+                    path.join(root, 'node_modules/big/package.json'),
+                    JSON.stringify({ name: 'big', version: '9.0.0', types: './index.d.ts' }, null, 2),
+                );
+                fs.writeFileSync(
+                    path.join(root, 'node_modules/big/index.d.ts'),
+                    names.map((n) => `export declare function ${n}(): void;`).join('\n') + '\n',
+                );
+                const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+                pkg.dependencies.big = '^9.0.0';
+                fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify(pkg, null, 2));
+            },
+        });
+        const out = await tools.render('code_package', { name: 'big' });
+        assert.match(out, /\[PARTIAL: cut at 500 names\]/);
     });
 
     it('code_ask with no embedder: a sentence pointing at the other eyes', async () => {

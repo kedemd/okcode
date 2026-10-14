@@ -65,15 +65,15 @@ okcode help <command> for one command.`;
 const HELP = {
     structure:
         'okcode structure [--dir sub/]\n  Directories by symbol count, total lines, and the largest top-level symbols.',
-    find: 'okcode find <query> [--kind function|class|method|const|…] [--limit N]\n  Definitions by name, doc prose and file content.',
+    find: 'okcode find <query> [--kind function|class|method|const|…] [--limit N] [--offset N]\n  Definitions by name, doc prose and file content. A cut page says total/offset and how to continue.',
     refs:
-        'okcode refs <query> [--limit N]\n  Every textual use, attributed to the symbol containing it, ranked and labelled against resolved imports:\n  local (defined in this file), imported (resolved from a file that defines it), or textual; [call] marks an actual call site.',
+        'okcode refs <query> [--limit N] [--offset N]\n  Every textual use, attributed to the symbol containing it, ranked and labelled against resolved imports:\n  local (defined in this file), imported (resolved from a file that defines it), or textual; [call] marks an actual call site.\n  Paged over the full ranked list — total is exact unless the raw scan itself hit its own (very high) cap.',
     importers:
-        'okcode importers <file> [--limit N]\n  Files with a RESOLVED import into <file> (not a text scan — see refs): { file, line, kind, names }, following one re-export hop.',
+        'okcode importers <file> [--limit N] [--offset N]\n  Files with a RESOLVED import into <file> (not a text scan — see refs): { file, line, kind, names }, following one re-export hop.',
     grep: 'okcode grep <pattern> [--regex] [--case-sensitive | --smart-case] [--glob G[,G…]] [--path DIR[,…]]\n            [--context N] [--max N] [--max-per-file N] [--limit FILES]\n            [--output lines|files|matches] [--page N] [--offset N]\n  Every matching line as file:line: text, grouped by file (rg-style); --output files\n  counts per file (rg -c), --output matches lists distinct matched strings (rg -o | uniq -c). Literal and\n  case-insensitive by default; --glob takes rg globs ("!x" excludes), repeatable.',
-    glob: 'okcode glob <pattern>[,<pattern>…] [--limit N]\n  Workspace files whose paths match (rg globs; "!x" excludes). Reads no file.',
+    glob: 'okcode glob <pattern>[,<pattern>…] [--limit N] [--offset N]\n  Workspace files whose paths match (rg globs; "!x" excludes). Reads no file.',
     outline:
-        'okcode outline <file> [--limit N]\n  The file in named pieces (symbols, regions or chunks) with line ranges and at=.',
+        'okcode outline <file> [--limit N] [--offset N]\n  The file in named pieces (symbols, regions or chunks) with line ranges and at=.',
     read: 'okcode read <symbol | parent.symbol | file#symbol | file | file:a-b>\n  Body on stdout; location and at= on stderr.',
     'read-at': 'okcode read-at <file> <a> <b> [--at HASH]\n  A line range; with --at, refused if the file moved.',
     packages: "okcode packages [name] [--refresh]\n  Declared dependencies, or one package's surface.",
@@ -301,7 +301,7 @@ async function structure(ws) {
 
 async function find(ws) {
     const q = need(positional[0], 'find needs a query');
-    const hits = await ws.find(q, { kind: flags.kind || null, limit: Number(flags.limit) || 20 });
+    const hits = await ws.find(q, { kind: flags.kind || null, limit: Number(flags.limit) || 20, offset: Number(flags.offset) || 0 });
     if (JSON_OUT) return j(hits);
     if (!hits.length) return out(`no match for "${q}"`);
     out();
@@ -313,11 +313,15 @@ async function find(ws) {
         if (h.doc) out(`  ${' '.repeat(9)} ${h.doc.slice(0, 120)}`);
         out();
     }
+    if (hits.truncated && hits.next != null) {
+        out(`  [showing ${hits.length} of ${hits.capped ? `at least ${hits.total ?? '?'}` : hits.total} — continue with --offset ${hits.next}]`);
+        out();
+    }
 }
 
 async function refs(ws) {
     const q = need(positional[0], 'refs needs a query');
-    const hits = await ws.refs(q, { limit: Number(flags.limit) || 40 });
+    const hits = await ws.refs(q, { limit: Number(flags.limit) || 40, offset: Number(flags.offset) || 0 });
     if (JSON_OUT) return j(hits);
     if (!hits.length) return out(`no uses of "${q}"`);
     const byFile = new Map();
@@ -334,6 +338,10 @@ async function refs(ws) {
         }
         out();
     }
+    if (hits.truncated && hits.next != null) {
+        out(`  [showing ${hits.length} of ${hits.capped ? `at least ${hits.atLeast ?? '?'}` : hits.total} — continue with --offset ${hits.next}]`);
+        out();
+    }
 }
 
 // F3's importers(file) (reverse imports) — surfaced here as its own CLI
@@ -342,14 +350,16 @@ async function refs(ws) {
 // instead (tools.js#codeOutline) rather than adding a second tool.
 async function importers(ws) {
     const file = need(positional[0], 'importers needs <file>');
-    const r = await ws.importers(file, { limit: Number(flags.limit) || 40 });
+    const r = await ws.importers(file, { limit: Number(flags.limit) || 40, offset: Number(flags.offset) || 0 });
     if (JSON_OUT) return j(r);
     if (!r.ok) {
         out(r.reason);
         throw new Exit(1);
     }
     if (!r.importers.length) return out(`nothing in ${r.file} imports it (resolved edges only — see refs for a text scan)`);
-    out(`\n${r.total} importer(s) of ${r.file}${r.truncated ? ` (showing ${r.importers.length})` : ''}\n`);
+    out(
+        `\n${r.total} importer(s) of ${r.file}${r.truncated ? ` (showing ${r.importers.length} from offset ${r.offset} — continue with --offset ${r.next})` : ''}\n`,
+    );
     for (const i of r.importers) {
         out(`  ${i.file}:${i.line}${i.kind ? `  ${i.kind}` : ''}${i.via ? `  (via ${i.via})` : ''}${i.names ? `  ${i.names.map((n) => n.local).join(', ')}` : ''}`);
     }
@@ -374,9 +384,9 @@ async function packages(ws) {
         out(`  entry: ${p.main || '(none)'}${p.types ? `   types: ${p.types}` : ''}`);
         if ((p.exportKeys || []).length) out(`  exports map: ${p.exportKeys.join(', ')}`);
         out(`\n  SURFACE (${p.surfaceFrom || 'not found'}${p.surfaceFile ? ` · ${p.surfaceFile}` : ''})`);
-        out(`  ${(p.surface || []).join(', ') || '(none)'}`);
+        out(`  ${(p.surface || []).join(', ') || '(none)'}${p.surfaceTruncated ? `\n  [PARTIAL: cut at ${p.surface.length} names]` : ''}`);
         if ((p.members || []).length) {
-            out(`\n  MEMBERS (${p.members.length})`);
+            out(`\n  MEMBERS (${p.members.length}${p.membersTruncated ? ', PARTIAL — cut here' : ''})`);
             out(`  ${p.members.join(', ')}`);
         }
         return out();
@@ -657,13 +667,16 @@ const WS_COMMANDS = {
     },
     glob: (ws) => {
         const pats = need(splitList(positional), 'glob needs a pattern');
-        return lookupVia(ws, 'code_glob', { pattern: pats, limit: flags.limit }, () =>
-            ws.glob(pats, { limit: Number(flags.limit) || 0 }),
+        return lookupVia(ws, 'code_glob', { pattern: pats, limit: flags.limit, offset: flags.offset }, () =>
+            ws.glob(pats, { limit: Number(flags.limit) || 0, offset: Number(flags.offset) || 0 }),
         );
     },
     outline: (ws) =>
-        lookupVia(ws, 'code_outline', { file: need(positional[0], 'outline needs <file>'), limit: flags.limit }, () =>
-            ws.outline(positional[0], { limit: Number(flags.limit) || 60 }),
+        lookupVia(
+            ws,
+            'code_outline',
+            { file: need(positional[0], 'outline needs <file>'), limit: flags.limit, offset: flags.offset },
+            () => ws.outline(positional[0], { limit: Number(flags.limit) || 60, offset: Number(flags.offset) || 0 }),
         ),
     ask: (ws) => {
         const q = need(positional.join(' '), 'ask needs a question');

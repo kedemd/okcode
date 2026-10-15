@@ -1,12 +1,12 @@
 'use strict';
-// Memory regression guard (h4-memory). A cold index must not let tree-sitter
-// parsing, the in-memory text cache or the store write path accumulate
-// without bound as the repo grows. This generates a few hundred small files
-// (no single oversized document — see the okdb content-FTS repro in
-// docs/MEMORY-NOTES.md for why a single multi-MB file is a separate, known
-// okdb-side issue, not one this bound is meant to catch) and asserts peak
+// Memory regression guard. A cold index must not let tree-sitter parsing, the
+// in-memory text cache or the store write path accumulate without bound as
+// the repo grows. This generates a few hundred small files and asserts peak
 // PRIVATE memory (RssAnon) sampled every ~10ms stays under a bound with
-// headroom, for both `fts` modes. /proc/self/status is Linux-only.
+// headroom, for both `fts` modes. Most of today's peak is V8 heap high-water
+// from okdb's full-text write churn (DESIGN §5); this bound catches a
+// regression on top of that, not the floor itself. /proc/self/status is
+// Linux-only.
 
 const os = require('os');
 const { describe, it, before, after } = require('node:test');

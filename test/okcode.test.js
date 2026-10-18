@@ -244,6 +244,10 @@ describe('okcode.open({ db })', () => {
             const after = (await oc.status('rs')).workspaces[0];
             assert.equal(after.files, FIXTURE_FILES.length);
             assert.equal(after.embedders[0].done, done, JSON.stringify(after.embedders));
+            // the recreated env gets its full-text indexes back in this same process
+            assert.equal(after.fts.symbols.status, 'ready', JSON.stringify(after.fts));
+            assert.equal(after.fts.files.status, 'ready', JSON.stringify(after.fts));
+            assert.ok((await ws2.find('marker')).length > 0);
 
             await assert.rejects(oc.reset('rs', { scope: 'bogus' }), /unknown scope/);
             await assert.rejects(oc.reset('nope', { scope: 'vectors' }), { code: 'OKCODE_UNKNOWN_WORKSPACE' });

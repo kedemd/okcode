@@ -252,7 +252,7 @@ fn truthy(v: &Value) -> bool {
 
 /// `extract(path, text).exports || []` — what packages.js needs from the analyser.
 fn extract_exports(path: &str, text: &str) -> Vec<String> {
-    okcode_analysis::extract(path, Some(text))
+    crate::host_analysis::extract(path, Some(text))
         .get("exports")
         .and_then(Value::as_array)
         .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())

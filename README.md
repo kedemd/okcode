@@ -125,6 +125,9 @@ Contract: [docs/ACCESS.md](docs/ACCESS.md).
 `isTextual`, `isSecret`), symbol extraction (`extract`, `parseSource`), validation (`validateSource`, `compareDiagnostics`),
 document sections (`regions`, `sectionOf`), text/EOL/diff utilities (`decode`, `normaliseEol`, `hunksFor`, …), template
 balance, convention colours, okjs, and dependency surfaces (`scanPackages`, `readPackages`). See [DESIGN §2](docs/DESIGN.md#2-layers).
+A host adds its own analysers with `registerExtension({ id, match, analyze, version })` and
+`registerExtractor(lang, fn)`: `extract()` and the workspaces' indexing use them for the textual paths they claim (a
+new `version` re-analyses those files on the next scan); every other path keeps the built-in analysis.
 
 **Model-facing tools** — `require('@kedem/okcode/lib/tools').createTools({ workspace: async (hint) => ws, workspaces })` →
 `{ schemas(), render(name, args), TOOLS }` for `code_map`, `code_find`, `code_grep`, `code_glob`, `code_outline`,

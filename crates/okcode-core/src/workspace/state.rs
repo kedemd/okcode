@@ -146,7 +146,7 @@ pub fn prepare_ingest(rel: &str, size: u64, mtime: Option<f64>, row_hash: Option
         }
         None => (None, true),
     };
-    let parsed = okcode_analysis::extract(rel, text.as_deref());
+    let parsed = crate::host_analysis::extract(rel, text.as_deref());
     let hash = match buf {
         Some(b) => Some(sha1_upper(b)),
         None => row_hash,

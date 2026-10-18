@@ -274,13 +274,13 @@ impl Workspace {
     /// analyzerVersionFor(path), cached by path shape (the part after the first dot of the basename).
     fn analyzer_version(&self, path: &str) -> Option<String> {
         let base = path.rsplit('/').next().unwrap_or(path);
-        let key = base.find('.').map(|i| base[i..].to_ascii_lowercase());
+        let key = base.find('.').map(|i| format!("{}:{}", crate::host_analysis::generation(), base[i..].to_ascii_lowercase()));
         if let Some(k) = &key {
             if let Some(v) = self.scan.versions.lock().unwrap_or_else(|e| e.into_inner()).get(k) {
                 return v.clone();
             }
         }
-        let v = okcode_analysis::analyzer_version_for(path);
+        let v = crate::host_analysis::analyzer_version_for(path);
         if let Some(k) = key {
             self.scan.versions.lock().unwrap_or_else(|e| e.into_inner()).insert(k, v.clone());
         }

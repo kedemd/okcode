@@ -9,6 +9,7 @@
 //! is caught and becomes an OKCODE_PANIC error, never an abort.
 mod access_bridge;
 mod access_api;
+mod analysis_host;
 mod okcode;
 mod okdb;
 mod store;

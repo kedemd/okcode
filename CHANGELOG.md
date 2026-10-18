@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+**Fixes**
+
+- `analysis.registerExtension` / `registerExtractor` drive workspace indexing again, as in 0.2: a textual path a host
+  extension or extractor claims is indexed (found, outlined, re-analysed on a version change) through it. 1.0.0 used
+  them only in `analysis.extract()`.
+- `oc.reset(id, { scope: 'all' })` no longer leaves full-text search off for the rest of the process (okdb 3.0.0
+  kept the removed environment's FTS registration; okcode now clears it when it recreates the environment).
+
+**Changes**
+
 - The package's JavaScript moved from `src/` to `lib/` (`main` is `lib/okcode.js`). `require('@kedem/okcode')` is
   unchanged; deep requires change path (`@kedem/okcode/src/tools` is now `@kedem/okcode/lib/tools`).
 - The bash/PowerShell access scripts are no longer shipped as files: they were already compiled into the native addon.

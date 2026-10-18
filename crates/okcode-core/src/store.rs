@@ -618,7 +618,17 @@ fn ensure_fts(db: &Arc<DbHost>, env_name: &str, ty: &str, config: &Value, drains
                 let _ = db.call("fts", None, "drop", vec![json!(ty), json!(FTS_NAME), json!(env_name)]);
             }
         }
-        db.call("fts", None, "ensure", vec![json!(ty), json!(FTS_NAME), config.clone(), json!(env_name)]).map(|_| ())
+        let ensure = || db.call("fts", None, "ensure", vec![json!(ty), json!(FTS_NAME), config.clone(), json!(env_name)]).map(|_| ());
+        match ensure() {
+            // okdb 3.0.0 keeps a removed env's FTS registration in memory: an env recreated under the same name
+            // (reset scope 'all') is refused ALREADY_EXISTS for an index its fts.list does not show. Drop the
+            // stale registration and ensure again.
+            Err(e) if current.is_none() && e.code.as_deref() == Some("ALREADY_EXISTS") => {
+                let _ = db.call("fts", None, "drop", vec![json!(ty), json!(FTS_NAME), json!(env_name)]);
+                ensure()
+            }
+            r => r,
+        }
     })();
     let _ = en;
     let mut outcome: std::result::Result<(), String> = match step {

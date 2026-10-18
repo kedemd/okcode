@@ -12,6 +12,7 @@
 pub mod db;
 pub mod error;
 pub mod host;
+pub mod host_analysis;
 pub mod okcode;
 pub mod pure;
 pub mod record;

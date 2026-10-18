@@ -173,3 +173,18 @@ it('rejects an unknown dialect and a missing run', () => {
     assert.throws(() => shell({ root: '/tmp', run: local, dialect: 'fish' }), /unknown shell dialect/);
     assert.throws(() => shell({ root: '/tmp' }), /run/);
 });
+
+it('many concurrent calls over a localRunner shell facade do not starve the thread pool', async () => {
+    const root = workspace({ 'a.js': 'a', 'b/c.js': 'c' });
+    const f = shell({ root, run: local });
+    const calls = [];
+    for (let i = 0; i < 12; i++) {
+        calls.push(f.stat(['a.js']), f.read(['a.js']), f.list());
+    }
+    const out = await Promise.race([
+        Promise.all(calls),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('deadlock: concurrent facade calls hung')), 30000).unref()),
+    ]);
+    assert.equal(out.length, 36);
+    assert.equal(out[1].get('a.js').toString(), 'a');
+});

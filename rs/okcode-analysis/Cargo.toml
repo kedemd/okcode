@@ -1,0 +1,21 @@
+[package]
+name = "okcode-analysis"
+version = "0.0.1"
+edition.workspace = true
+publish.workspace = true
+
+# The analysis layer (src/analysis/index.js): composes the wave 1 crates. No okdb (compiles fast).
+[dependencies]
+serde_json = "1"
+okcode-text = { path = "../okcode-text" }
+okcode-js = { path = "../okcode-js" }
+okcode-treesitter = { path = "../okcode-treesitter" }
+okcode-okjs = { path = "../okcode-okjs" }
+okcode-chunk = { path = "../okcode-chunk" }
+okcode-grep = { path = "../okcode-grep" }
+okcode-edges = { path = "../okcode-edges" }
+okcode-access = { path = "../okcode-access" }
+okcode-embed = { path = "../okcode-embed" }
+
+[dev-dependencies]
+okcode-golden = { path = "../okcode-golden" }

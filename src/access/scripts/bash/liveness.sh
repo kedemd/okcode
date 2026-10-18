@@ -1,5 +1,5 @@
 # stdin: root, pid. stdout: "HOST <nodename>" then "ALIVE <starttime|->" | "DEAD"
-# | "UNKNOWN". The host is the TARGET's, so a lock is only ever judged by the
+# | "UNKNOWN". The host is the TARGET's, so a lock is only ever assessed by the
 # machine its pid could live on. /proc (Linux) answers for any user's process
 # and gives the start time (field 22, parsed after the last ')' since the
 # command name may contain spaces) so a reused pid is told apart from the

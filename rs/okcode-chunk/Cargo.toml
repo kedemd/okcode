@@ -1,0 +1,16 @@
+[package]
+name = "okcode-chunk"
+version = "0.0.1"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde_json = "1"
+regex = "1"
+oxc_allocator = "0.154"
+oxc_parser = "0.154"
+oxc_span = "0.154"
+oxc_ast = { version = "0.154", features = ["serialize"] }
+
+[dev-dependencies]
+okcode-golden = { path = "../okcode-golden" }

@@ -7,11 +7,9 @@
 # caches, vendored output, never a caller's own source) below the root are
 # never entered (the root itself may be a dot directory). Anything NOT on
 # $dotPrune (`.github/`, `.storybook/`, a `.well-known` route) is walked
-# normally and left to `.gitignore` to decide — this used to prune EVERY
-# dot-directory (`$e.Name.StartsWith('.')`), which silently dropped real
-# source a real project keeps in one. Keep $dotPrune in exact agreement with
-# common.js's PRUNE_DOT_DIRS and scripts/bash/list.sh's $dotprune —
-# test/access-contract.test.js checks all three. Reparse points are not
+# normally and left to `.gitignore` to decide, so source a project keeps in
+# a dot-directory is still found. $dotPrune is the same list the local and
+# bash facades prune (PRUNE_DOT_DIRS). Reparse points are not
 # followed. AN UNREADABLE FILE IS SKIPPED, NOT FATAL: a workspace holding a
 # running database or any file another process has locked must cost that
 # file, never the whole listing.

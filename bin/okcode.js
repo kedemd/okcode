@@ -2,9 +2,8 @@
 'use strict';
 // okcode — locate, read and edit code by name, from the terminal.
 //
-// Driveable with nothing else running. That is the point: the library is
-// general purpose, so it has to be usable and testable on its own before any
-// host wires it in.
+// Driveable with nothing else running: the library is general purpose, so it
+// is usable on its own, without a host wiring it in.
 //
 // `--at` is mandatory for edits against an existing file — read the symbol or
 // file first (its `at=` is printed to stderr) and pass that token back. A
@@ -119,7 +118,7 @@ function parseArgs(argv) {
             value = name.slice(eq + 1);
             name = name.slice(0, eq);
         } else if (name === 'json' && cmd === 'edit-batch' && rest[i + 1] && !rest[i + 1].startsWith('--')) {
-            // brain-compatible: `edit-batch --json batch.json` names the batch.
+            // `edit-batch --json batch.json` names the batch file.
             name = 'batch';
             value = rest[++i];
         } else if (BOOL.has(name)) {
@@ -351,7 +350,7 @@ async function refs(ws) {
     }
 }
 
-// F3's importers(file) (reverse imports) — surfaced here as its own CLI
+// importers(file) (reverse imports) — surfaced here as its own CLI
 // command: a terminal caller asks "who uses this file" directly, by name,
 // where the model-facing side folds the same answer into code_outline
 // instead (tools.js#codeOutline) rather than adding a second tool.

@@ -12,6 +12,8 @@ const { spawnSync } = require('child_process');
 const { writeFixture, tmpRoot } = require('./fixtures/code-fixture');
 
 const BIN = path.join(__dirname, '..', 'bin', 'okcode.js');
+// OKCODE_CLI_BIN runs the same cases against another build of the CLI (the Rust rs/okcode-cli binary).
+const BIN_CMD = process.env.OKCODE_CLI_BIN ? [process.env.OKCODE_CLI_BIN] : [process.execPath, BIN];
 const HAVE_OKCODE = fs.existsSync(path.join(__dirname, '..', 'src', 'okcode.js'));
 const skip = HAVE_OKCODE ? false : 'src/okcode.js not built yet';
 
@@ -36,8 +38,8 @@ describe('cli', () => {
     // default root is never what is being tested by accident.
     const run = (args, { withRoot = true, timeout = 120000 } = {}) => {
         const r = spawnSync(
-            process.execPath,
-            [BIN, ...args, ...(withRoot ? ['--root', root, '--id', 'fx'] : []), '--store', store],
+            BIN_CMD[0],
+            [...BIN_CMD.slice(1), ...args, ...(withRoot ? ['--root', root, '--id', 'fx'] : []), '--store', store],
             { cwd: scratch, encoding: 'utf8', timeout, env: { ...process.env, OKCODE_VERBOSE: '' } },
         );
         return { code: r.status, stdout: r.stdout, stderr: r.stderr };
@@ -55,7 +57,7 @@ describe('cli', () => {
             writeFixture(r2);
             fs.writeFileSync(path.join(r2, '.gitignore'), 'node_modules/');
             const local = (args) =>
-                spawnSync(process.execPath, [BIN, ...args, '--json'], {
+                spawnSync(BIN_CMD[0], [...BIN_CMD.slice(1), ...args, '--json'], {
                     cwd: r2, // no --root, no --store: the folder you are in
                     encoding: 'utf8',
                     timeout: 120000,
@@ -80,18 +82,18 @@ describe('cli', () => {
     });
 
     it('--help and per-command help need no store', () => {
-        const h = spawnSync(process.execPath, [BIN, '--help'], { encoding: 'utf8' });
+        const h = spawnSync(BIN_CMD[0], [...BIN_CMD.slice(1), '--help'], { encoding: 'utf8' });
         assert.equal(h.status, 0);
         assert.match(h.stdout, /usage: okcode <command>/);
         for (const c of ['find', 'edit-batch', 'reset', 'remove-workspace']) assert.match(h.stdout, new RegExp(c));
-        const one = spawnSync(process.execPath, [BIN, 'help', 'edit'], { encoding: 'utf8' });
+        const one = spawnSync(BIN_CMD[0], [...BIN_CMD.slice(1), 'help', 'edit'], { encoding: 'utf8' });
         assert.equal(one.status, 0);
         assert.match(one.stdout, /--at HASH/);
-        const flag = spawnSync(process.execPath, [BIN, 'read', '--help'], { encoding: 'utf8' });
+        const flag = spawnSync(BIN_CMD[0], [...BIN_CMD.slice(1), 'read', '--help'], { encoding: 'utf8' });
         assert.match(flag.stdout, /at= on stderr/);
-        const none = spawnSync(process.execPath, [BIN], { encoding: 'utf8' });
+        const none = spawnSync(BIN_CMD[0], BIN_CMD.slice(1), { encoding: 'utf8' });
         assert.equal(none.status, 1);
-        const bogus = spawnSync(process.execPath, [BIN, 'bogus'], { encoding: 'utf8' });
+        const bogus = spawnSync(BIN_CMD[0], [...BIN_CMD.slice(1), 'bogus'], { encoding: 'utf8' });
         assert.equal(bogus.status, 1);
         assert.match(bogus.stderr, /unknown command "bogus"/);
     });

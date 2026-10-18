@@ -1,0 +1,14 @@
+{
+    "scope": "@kedem",
+    "prefix": "okcode",
+    "comment": "Release plan C6: one npm package per target, @kedem/okcode-<key>, holding okcode.node (the addon) and bin/okcode (the standalone CLI). src/native/native.js resolves `@kedem/okcode-${process.platform}-${process.arch}[-musl]/okcode.node`.",
+    "targets": [
+        { "key": "linux-x64", "os": "linux", "cpu": "x64", "libc": "glibc", "rust": "x86_64-unknown-linux-gnu", "runner": "ubuntu-24.04", "glibcFloor": "2.31" },
+        { "key": "linux-arm64", "os": "linux", "cpu": "arm64", "libc": "glibc", "rust": "aarch64-unknown-linux-gnu", "runner": "ubuntu-24.04-arm", "glibcFloor": "2.31" },
+        { "key": "linux-x64-musl", "os": "linux", "cpu": "x64", "libc": "musl", "rust": "x86_64-unknown-linux-musl", "runner": "ubuntu-24.04", "glibcFloor": null },
+        { "key": "linux-arm64-musl", "os": "linux", "cpu": "arm64", "libc": "musl", "rust": "aarch64-unknown-linux-musl", "runner": "ubuntu-24.04-arm", "glibcFloor": null },
+        { "key": "darwin-x64", "os": "darwin", "cpu": "x64", "libc": null, "rust": "x86_64-apple-darwin", "runner": "macos-13", "glibcFloor": null },
+        { "key": "darwin-arm64", "os": "darwin", "cpu": "arm64", "libc": null, "rust": "aarch64-apple-darwin", "runner": "macos-14", "glibcFloor": null },
+        { "key": "win32-x64", "os": "win32", "cpu": "x64", "libc": null, "rust": "x86_64-pc-windows-msvc", "runner": "windows-2022", "glibcFloor": null }
+    ]
+}

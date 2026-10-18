@@ -3,24 +3,23 @@
 // syntax — that is exactly what it exists to avoid. An extension owns
 // recognising its own files (`match`) and producing a structural analysis of
 // one (`analyze`); everything else in the code index consumes that analysis
-// through the one normalised shape parse.js's `extract()` already returns
+// through the one normalised shape `extract()` already returns
 // (symbols/imports/exports), plus whatever extra fields ride along for
 // callers that want the richer, dialect-specific result: `diagnostics`,
 // `coverage`, the raw analysis itself (opaque to this registry, under
 // whatever name the extension chooses — ext-okjs.js uses `okAnalysis`), and
 // `regions`, which an extension MUST already have projected down to this
 // registry's own shape — `{ name, kind, lineStart, lineEnd, doc }` outline
-// pieces only — never a dialect's own region shape. workspace.js's
-// carveRegions() and the rest of the piecewise outline consume exactly that
-// shape and nothing dialect-specific; an extension that leaks its own region
-// fields (source/contentRange/role/…) past itself is a bug in the extension,
-// not something this registry — or workspace.js — should ever have to know.
+// pieces only — never a dialect's own region shape. The workspace's
+// piecewise outline consumes exactly that shape and nothing dialect-specific;
+// an extension that leaks its own region fields (source/contentRange/role/…)
+// past itself is a bug in the extension, not something this registry — or
+// the workspace — should ever have to know.
 //
-// First match wins, in REGISTRATION order — there is currently exactly one
-// registrant (see ext-okjs.js) and no ordering policy has ever been needed,
-// but a later file extension owned by two extensions is a real possibility
-// (a wrapper format, a preprocessor) and "first registered" is at least a
-// predictable answer rather than an accidental one.
+// First match wins, in REGISTRATION order. okcode itself registers one
+// extension (okjs, see ext-okjs.js); when two extensions claim the same file
+// (a wrapper format, a preprocessor), "first registered" is a predictable
+// answer rather than an accidental one.
 
 const registry = [];
 

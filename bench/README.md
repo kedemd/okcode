@@ -58,7 +58,7 @@ Env:
 ## Quality check (D/E only, one-time)
 
 `bench/questions-frontend.json` — 8 plain-English questions about
-`storita/frontend`, each with the file that answers it, determined by
+a 578-file TypeScript application, each with the file that answers it, determined by
 reading the code (not by running anything first). `bench/quality.js` scores
 `ask()` (configs D/E) and a `find()` + grep-only baseline (no embedder) by
 hit@3 / hit@10: whether the right file appears in the top 3 / top 10 hits.

@@ -1,0 +1,12 @@
+[package]
+name = "okcode-edges"
+version = "0.0.1"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde_json = { version = "1", features = ["preserve_order"] }
+regex = "1"
+
+[dev-dependencies]
+okcode-golden = { path = "../okcode-golden" }

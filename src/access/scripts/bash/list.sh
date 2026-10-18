@@ -8,12 +8,11 @@
 #
 # A FIXED LIST OF KNOWN NON-SOURCE DOT-DIRECTORIES IS PRUNED BY THE WALK, not
 # filtered afterwards — otherwise the walk still descends every byte of .git
-# or a working database directory. Keep $dotprune in exact agreement with
-# common.js's PRUNE_DOT_DIRS and scripts/powershell/list.ps1's $dotPrune —
-# test/access-contract.test.js checks all three. Anything NOT on this list
+# or a working database directory. $dotprune is the same list the local and
+# PowerShell facades prune (PRUNE_DOT_DIRS). Anything NOT on this list
 # (`.github/`, `.storybook/`, a `.well-known` route) is walked normally and
-# left to `.gitignore` to decide — this used to prune EVERY dot-directory
-# (`-name '.?*'`), which silently dropped real source projects keep in one.
+# left to `.gitignore` to decide, so source a project keeps in a
+# dot-directory is still found.
 # The prune is anchored BELOW the root: a root that is itself a dot
 # directory must list normally, not prune the whole walk at its first step.
 dotprune=(.git .hg .svn .okcode .adcode .next .nuxt .svelte-kit .turbo .cache .parcel-cache .venv .tox .mypy_cache .pytest_cache .ruff_cache .gradle .idea .vs .terraform .serverless .yarn .pnpm-store .expo)
@@ -38,12 +37,9 @@ IFS= read -r -d '' under || exit 3
 IFS= read -r -d '' limit || exit 3
 names=("${dotprune[@]}")
 while IFS= read -r -d '' s; do names+=("$s"); done
-# Built with `-o` BETWEEN entries, never trailing — `names` is never empty
-# (dotprune alone guarantees that), but the old code's "always end in a
-# real `-name` anchor" trick (`-name '.?*'` as the fixed last alternative)
-# is gone now that the dot-prune list is itself just more names in this
-# same array, so a dangling trailing `-o` would otherwise be a find syntax
-# error.
+# Built with `-o` BETWEEN entries, never trailing: a dangling trailing `-o`
+# would be a find syntax error. (`names` is never empty — dotprune alone
+# guarantees that.)
 args=()
 last=$((${#names[@]} - 1))
 for i in "${!names[@]}"; do

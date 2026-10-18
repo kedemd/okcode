@@ -1,358 +1,64 @@
 'use strict';
-// Symbol extraction. acorn turns source into an exact syntax tree; everything
-// below decides what counts as a symbol, an import, an export.
-//
-// A real parser rather than heuristics, because this indexes ARBITRARY
-// projects, not just this unusually regular one. Regex extraction survives
-// `function foo()` and dies quietly on arrow-function consts, class fields,
-// `export * from`, destructured requires, decorators and minified vendor
-// files. Subtly-wrong is the worst possible failure mode for a map that
-// drives edits: it does not error, it points somewhere else. When acorn
-// cannot parse a file it says so with a reason and a position, and the file
-// is recorded as unparsed rather than silently half-indexed.
-
-const acorn = require('acorn');
+// Language detection and symbol extraction, done by the native core. This file keeps only what
+// cannot cross into it as data:
+//   - the registry of user extractors (registerExtractor) and the extension registry's
+//     consultation order in extract(): extension, then a registered extractor for the language,
+//     then native (tree-sitter / JavaScript / searchable text);
+//   - the constant TEXT_MAX.
+const { pure } = require('../native/pure');
 const { extensionFor } = require('./extensions');
-// Registers the 'okjs' extension as a side effect — the only registrant
-// today. extract() below never mentions OKJS by name; it only ever asks the
-// generic registry whether SOMETHING claims this path.
+// Requiring this module registers the okjs extension.
 require('./ext-okjs');
-const treesitter = require('./treesitter');
 
-const JS = new Set(['.js', '.mjs', '.cjs', '.jsx']);
+const f = pure('analysis/parse');
+const langOf = f('langOf');
+const extOf = f('extOf');
+const isTextual = f('isTextual');
+const isSecret = f('isSecret');
+const extractJavaScript = f('extractJavaScript');
+const extractGeneric = f('extractGeneric');
+const nativeVersionFor = f('analyzerVersionFor');
+const nativeParseSource = f('parseSource');
 
-// Text the index will happily hold and search. Anything not listed is treated
-// as opaque: it still gets a file node (path, hash, size), so it is never
-// invisible, but its bytes are not carried around.
-const TEXT = new Set([
-    '.md',
-    '.markdown',
-    '.txt',
-    '.json',
-    '.jsonc',
-    '.yml',
-    '.yaml',
-    '.html',
-    '.htm',
-    '.css',
-    '.scss',
-    '.xml',
-    '.svg',
-    '.csv',
-    '.ini',
-    '.toml',
-    '.env',
-    '.sh',
-    '.bash',
-    '.ps1',
-    '.sql',
-    '.gitignore',
-    '.editorconfig',
-    '.ok',
-]);
-// Big files are read for their hash and skipped for their content: one
-// minified bundle would otherwise dominate every search in the workspace.
 const TEXT_MAX = 512 * 1024;
 
-function extOf(path) {
-    const m = /\.[^./\\]+$/.exec(path);
-    return m ? m[0].toLowerCase() : '';
-}
+// The languages with a native extractor (JavaScript, then the tree-sitter ones): what a fallback from
+// an extension may run for the same path.
+const NATIVE_LANGS = new Set(['javascript', 'typescript', 'python', 'go', 'rust', 'php', 'java', 'csharp', 'c', 'cpp']);
 
-const LANGS = {
-    '.ts': 'typescript',
-    '.tsx': 'typescript',
-    '.mts': 'typescript',
-    '.cts': 'typescript',
-    '.py': 'python',
-    '.go': 'go',
-    '.rs': 'rust',
-    '.php': 'php',
-    '.phtml': 'php',
-    '.java': 'java',
-    '.cs': 'csharp',
-    // `.h` defaults to the C grammar, not C++ — see treesitter.js's `c`
-    // LANGUAGES entry for why (and the documented limitation for a
-    // project whose `.h` files are actually C++).
-    '.c': 'c',
-    '.h': 'cpp', // see treesitter.js: the C++ grammar parses C headers too
-    '.cpp': 'cpp',
-    '.cc': 'cpp',
-    '.cxx': 'cpp',
-    '.hpp': 'cpp',
-    '.hh': 'cpp',
-    '.hxx': 'cpp',
-    '.ipp': 'cpp',
-    '.json': 'json',
-    '.jsonc': 'json',
-    '.md': 'markdown',
-    '.markdown': 'markdown',
-    '.txt': 'text',
-    '.html': 'html',
-    '.htm': 'html',
-    '.ok': 'html',
-    '.css': 'css',
-    '.scss': 'css',
-    '.yml': 'yaml',
-    '.yaml': 'yaml',
-    '.sh': 'shell',
-    '.bash': 'shell',
-    '.ps1': 'powershell',
-    '.sql': 'sql',
-    '.xml': 'xml',
-    '.svg': 'svg',
-    '.csv': 'csv',
-    '.toml': 'toml',
-    '.ini': 'ini',
-};
-
-function langOf(path) {
-    const e = extOf(path);
-    if (JS.has(e)) return 'javascript';
-    return LANGS[e] || 'other';
-}
-
-// Files whose CONTENTS must never enter the index.
-//
-// `.env` is text, and an earlier version of this happily read it: the index
-// would have held this project's API keys as a row in the database and as
-// tokens in a full-text index that an agent can query, from where they would
-// have been copied into observations and prompts. Nothing about the graph
-// needs a secret's contents, and a search that can return one is a leak with
-// a search box on it. The file still gets a node — path, size, hash — because
-// "not readable" and "not there" are different answers.
-const SECRET = [
-    /(^|\/)\.env($|\.)/i,
-    /(^|\/)\.(npmrc|netrc|pgpass|htpasswd)$/i,
-    /(^|\/)(id_rsa|id_dsa|id_ecdsa|id_ed25519)(\.pub)?$/i,
-    /(^|\/)(credentials|secrets?)(\.[\w-]+)?\.(json|ya?ml|ini|txt)$/i,
-    /\.(pem|key|p12|pfx|keystore|jks|license)$/i,
-];
-
-function isSecret(path) {
-    const p = String(path).replace(/\\/g, '/');
-    return SECRET.some((re) => re.test(p));
-}
-
-// Is this worth carrying the bytes of? Text we can search; everything else
-// gets a file node and nothing more. Always a boolean: the workspace compares
-// it with `!==` against a row's stored `indexed` flag, and an `undefined` (or a
-// LANGS string) there made every opaque file look re-stale on every sync.
-function isTextual(path, size) {
-    if (isSecret(path)) return false;
-    const e = extOf(path);
-    return !!(JS.has(e) || TEXT.has(e) || LANGS[e]) && (!size || size <= TEXT_MAX);
-}
-
-// The leading block/line comment above a declaration. This codebase explains
-// nearly every function in prose directly above it, which makes that text the
-// highest-signal thing in the file for "where is X handled" — worth capturing
-// as part of the symbol rather than leaving in the body.
-function docAbove(src, node, prevEnd) {
-    const before = src.slice(prevEnd, node.start);
-    const lines = before.split('\n').map((l) => l.trim());
-    const doc = [];
-    for (let i = lines.length - 1; i >= 0; i--) {
-        const l = lines[i];
-        if (!l) {
-            if (doc.length) break;
-            continue;
-        }
-        if (l.startsWith('//')) {
-            doc.unshift(l.replace(/^\/\/\s?/, ''));
-            continue;
-        }
-        if (l.endsWith('*/') || l.startsWith('*') || l.startsWith('/*')) {
-            doc.unshift(l.replace(/^\/\*+\s?|\s?\*+\/$|^\*\s?/g, ''));
-            continue;
-        }
-        break;
-    }
-    return doc.join(' ').trim().slice(0, 400);
-}
-
-function signatureOf(src, node, name) {
-    const fn =
-        node.type === 'FunctionDeclaration'
-            ? node
-            : node.init && (node.init.type === 'ArrowFunctionExpression' || node.init.type === 'FunctionExpression')
-              ? node.init
-              : null;
-    if (!fn) return null;
-    // Drop DEFAULTS, not everything after the first `=`. Splitting on the
-    // character turned `{ kind = null, limit = 20 } = {}` into `{ kind` — a
-    // signature that is not merely ugly but wrong about the parameter's shape.
-    // An AssignmentPattern already separates the two halves; use its left.
-    const params = fn.params
-        .map((p) => {
-            const bare = p.type === 'AssignmentPattern' ? p.left : p;
-            return src.slice(bare.start, bare.end).replace(/\s+/g, ' ').trim();
-        })
-        .join(', ');
-    return `${fn.async ? 'async ' : ''}${name}(${params})`;
-}
-
-// The name a member is addressed by — ALWAYS a string. A plain key is its
-// identifier (or its literal, stringified: `7() {}` is "7", and `0() {}` is
-// no longer dropped for being falsy). A COMPUTED key is named by its source
-// text in brackets, exactly as the code spells it — `[Symbol.iterator]`,
-// `[/re/]`, `[KEY]` (a computed plain string or number is just its value) —
-// because that is what a reader searches for, and because the raw key node's
-// value (a RegExp for `[/re/]`, a number for `[42]`) is
-// not a name: stored as one, it reached an indexed field, where okdb ≥ 2.3.2
-// rejects a non-scalar and aborts the whole write. null when there is none.
-const KEY_TEXT_MAX = 120;
-function memberKeyName(src, m) {
-    const k = m && m.key;
-    if (!k) return null;
-    if (m.computed) {
-        // `['lit']`, `[42]` and a plain `[`lit`]` name exactly what `lit` and
-        // `42` would; anything else (a regex, an identifier, an expression)
-        // is named by its source.
-        if (k.type === 'Literal' && !k.regex && k.value != null && typeof k.value !== 'object') return String(k.value);
-        if (k.type === 'TemplateLiteral' && !k.expressions.length && k.quasis.length === 1) {
-            const cooked = k.quasis[0].value.cooked;
-            if (typeof cooked === 'string' && cooked) return cooked;
-        }
-        const text = src.slice(k.start, k.end).replace(/\s+/g, ' ').trim();
-        if (!text) return null;
-        return `[${text.length > KEY_TEXT_MAX ? `${text.slice(0, KEY_TEXT_MAX)}…` : text}]`;
-    }
-    if (typeof k.name === 'string' && k.name) return k.name;
-    if (k.type === 'Literal' && k.value != null && typeof k.value !== 'object') return String(k.value);
-    return null;
-}
-
-// F3: the names an ImportDeclaration's specifiers bind, paired with their
-// pre-alias name in the source module — `import Foo from …` and
-// `import * as ns from …` have no source-side name to pair against
-// ('default' / '*' are not identifiers the target file defines), so those
-// carry a synthetic `imported` rather than left null, consistent with
-// treesitter.js's generic reader always producing SOME pairing.
-function importNames(specifiers) {
-    return (specifiers || []).map((s) => {
-        if (s.type === 'ImportDefaultSpecifier') return { local: s.local.name, imported: 'default' };
-        if (s.type === 'ImportNamespaceSpecifier') return { local: s.local.name, imported: '*' };
-        return { local: s.local.name, imported: s.imported.name || s.imported.value };
-    });
-}
-
-// F3's cheap call-site references: every CallExpression/NewExpression's
-// callee, by line — "whatever acorn gives cheaply" (WORKPLAN F3), i.e. no
-// scope resolution, just the identifier or plain `.member` name at the
-// call site, the same shape treesitter.js's `@reference.call` captures use
-// so refs() can mark a hit `call: true` without caring which extractor ran.
-// A FULL walk, deliberately not depth-limited like the symbol walk above —
-// a call inside a deeply-nested callback is still a call site worth
-// knowing about, even though it earns no symbol of its own.
-function collectCalls(ast) {
-    const refs = [];
-    function calleeName(callee) {
-        if (callee.type === 'Identifier') return callee.name;
-        if (callee.type === 'MemberExpression' && !callee.computed && callee.property.type === 'Identifier') {
-            return callee.property.name;
-        }
-        return null;
-    }
-    function visit(node) {
-        if (!node || typeof node !== 'object' || typeof node.type !== 'string') return;
-        if (node.type === 'CallExpression' || node.type === 'NewExpression') {
-            const name = calleeName(node.callee);
-            if (name) refs.push({ name, kind: 'call', line: node.loc.start.line });
-        }
-        for (const key in node) {
-            if (key === 'loc' || key === 'start' || key === 'end' || key === 'range') continue;
-            const v = node[key];
-            if (Array.isArray(v)) {
-                for (const c of v) visit(c);
-            } else visit(v);
-        }
-    }
-    for (const node of ast.body) visit(node);
-    return refs;
-}
-
-// Parse once, try script then module. sourceType matters: an .mjs parsed as a
-// script fails on `import`, which is exactly the honest failure acorn gives
-// and a regex would have papered over.
-function parseSource(src) {
-    let lastErr;
-    for (const sourceType of ['script', 'module']) {
-        try {
-            return acorn.parse(src, { ecmaVersion: 'latest', locations: true, sourceType, allowHashBang: true });
-        } catch (err) {
-            lastErr = err;
-        }
-    }
-    throw lastErr;
-}
-
-// ── extractor registry ──────────────────────────────────────────────────────
-// Adding a language is registering a function here, not editing extract().
-// An extractor takes (path, src) and returns { symbols, imports, exports };
-// symbols need name, kind, lineStart, lineEnd, and may carry signature + doc.
-//
-// JavaScript is the only one implemented, and acorn only speaks JavaScript.
-// The general answer for Rust, Go, C, C++ and the rest is tree-sitter: one
-// interface, a grammar per language, error-tolerant (it parses a file that
-// does not compile) and incremental. Its cost is native bindings, which is
-// the one dependency that reliably hurts on Windows — so it is worth taking
-// deliberately, when a non-JS project actually arrives, rather than
-// speculatively. Until then every other language is still INDEXED, just as
-// searchable text rather than structure; nothing is invisible.
+// User-registered extractors only; every built-in language is native.
 const EXTRACTORS = new Map();
 
 function registerExtractor(lang, fn) {
     EXTRACTORS.set(lang, fn);
 }
 
+// The generic extractor for a language: (path, src) => { symbols, imports, exports, … }, throwing when it
+// cannot parse (the shape every registered extractor has).
+function extractorFor(lang) {
+    const own = EXTRACTORS.get(lang);
+    if (own) return own;
+    if (!NATIVE_LANGS.has(lang)) return null;
+    return (path, src) => {
+        const r = extractGeneric(path, src);
+        if (!r.parsed) throw new Error(r.reason);
+        const { path: _p, lang: _l, lines: _n, parsed: _ok, indexed: _i, analyzerVersion: _v, reason: _r, extractor: _e, ...rest } = r;
+        return rest;
+    };
+}
+
 function extract(path, src) {
+    if (src == null) return extractGeneric(path, null);
     const lang = langOf(path);
-    const lines = src == null ? 0 : src.split('\n').length;
-    // Opaque: an image, a binary, something too large to carry. It still gets
-    // a record so the project's shape is complete — "not searchable" and "not
-    // there" are very different answers to give a caller.
-    if (src == null) {
-        return {
-            path,
-            lang,
-            lines: 0,
-            symbols: [],
-            imports: [],
-            exports: [],
-            parsed: false,
-            indexed: false,
-            reason: isSecret(path)
-                ? 'may hold credentials — hashed, never read'
-                : 'binary or oversized — hashed, not read',
-        };
-    }
-    // An extension claiming this path outranks the generic lang-keyed
-    // extractor below — a `.ok.js` file matches the plain `.js` extension
-    // too, and the acorn extractor would otherwise run on it and find
-    // nothing (an `export default { ... }` object has no `.id` for acorn's
-    // export handling to key off). `analyzerVersion` is stamped even on
-    // failure, so a source that never parses does not get re-analysed on
-    // every scan — see the workspace's refresh restale check, which compares
-    // this against the extension's CURRENT version and forces a reparse
-    // only when they disagree.
+    const lines = src.split('\n').length;
     const ext = extensionFor(path);
     if (ext) {
-        // Defense in depth: ext-okjs.js already fails soft internally, but
-        // this call site must not trust every future or third-party
-        // extension to keep that same discipline — a checker that throws
-        // must never take the whole scan down with it, same guarantee the
-        // built-in EXTRACTORS path below gives itself.
         try {
             const { okAnalysis, diagnostics, coverage, regions, fallback, ...envelope } = ext.analyze({
                 path,
                 source: src,
             });
-            // An extension that cannot do its job (an optional analyser not
-            // installed) may ask for the generic extractor instead of leaving
-            // the file unparsed: a `.ok.js` file is still JavaScript. Its
-            // reason rides along so the degraded result is visible as such.
-            const generic = fallback && EXTRACTORS.get(lang);
+            const generic = fallback && extractorFor(lang);
             if (generic) {
                 try {
                     return {
@@ -405,83 +111,21 @@ function extract(path, src) {
         }
     }
 
-    const extractor = EXTRACTORS.get(lang);
-    if (!extractor) {
-        // Searchable, just not structured: markdown, JSON, a runbook, an HTML
-        // template, and for now Rust/Go/C/TypeScript too. refs() searches
-        // these, find() does not — there are no symbols to find, and
-        // pretending otherwise would misrepresent what the index knows.
-        return {
-            path,
-            lang,
-            lines,
-            symbols: [],
-            imports: [],
-            exports: [],
-            parsed: false,
-            indexed: true,
-            reason: `${lang} — searchable, no symbol extractor yet`,
-        };
-    }
-    // Stamped on success AND failure: a row that does not carry the current
-    // version is re-ingested on the next scan even when its hash never moved.
+    const registered = EXTRACTORS.get(lang);
+    if (!registered) return extractGeneric(path, src);
     const analyzerVersion = analyzerVersionFor(path);
     try {
         return {
             path,
             lang,
             lines,
-            ...extractor(path, src),
+            ...registered(path, src),
             analyzerVersion,
             parsed: true,
             indexed: true,
-            // Only stamped for JS-family files, where there are now TWO
-            // possible extractors — every other language here has exactly
-            // one, so saying which one ran would be noise, not information.
             ...(lang === 'javascript' ? { extractor: 'acorn' } : {}),
         };
     } catch (err) {
-        // acorn cannot parse JSX at all — not a rare malformed file, but
-        // every .jsx file and every .js/.mjs/.cjs file written with JSX in
-        // it, which is most React code. Before falling back, try the
-        // tree-sitter TSX grammar (treesitter.js's 'typescript' entry loads
-        // both .ts and .tsx wasm); acorn stays the ONLY path for a file it
-        // can actually parse — it is richer and already tested — so this
-        // only ever runs on acorn's failure, never instead of it.
-        // Acorn is strict in places tree-sitter's grammar is lenient — a
-        // doubled `,,` inside an object literal is a real SyntaxError to
-        // acorn (and to node) but tree-sitter's parser accepts it with no
-        // ERROR node at all. "tree-sitter parsed it cleanly" is therefore
-        // NOT by itself proof the file was JSX, not a bug — a cheap extra
-        // check is: does acorn's own failure position land on a `<`? Every
-        // JSX file acorn cannot parse fails AT the opening `<` of the first
-        // tag it meets (everything before that is ordinary JS, which acorn
-        // already parsed fine) — a real syntax error essentially never
-        // fails there, since `<` is also the less-than operator and valid
-        // in that position for an actual expression.
-        const looksLikeJsx = lang === 'javascript' && Number.isInteger(err.pos) && src[err.pos] === '<';
-        if (looksLikeJsx) {
-            const fallback = treesitter.extractJsxFallback(path, src);
-            // A clean tree-sitter parse (no ERROR/MISSING nodes) is treated
-            // as a real success; one that STILL has syntax errors (acorn's
-            // "function {{{" case, say) falls through to the same unparsed
-            // record as before — tree-sitter being error-tolerant must not
-            // turn a genuinely broken file into a falsely "parsed" one.
-            if (fallback && !fallback.hasErrors) {
-                const { hasErrors, ...rest } = fallback;
-                return {
-                    path,
-                    lang,
-                    lines,
-                    ...rest,
-                    analyzerVersion,
-                    parsed: true,
-                    indexed: true,
-                    extractor: 'treesitter-tsx',
-                    reason: 'acorn cannot parse JSX; extracted via the tree-sitter TSX grammar',
-                };
-            }
-        }
         return {
             path,
             lang,
@@ -497,335 +141,15 @@ function extract(path, src) {
     }
 }
 
-// What a stored row's `analyzerVersion` must equal for its symbols, imports
-// and call sites to be trusted without re-parsing (extensions stamp their own,
-// see extract()). Bump JS_ANALYZER_VERSION whenever extractJavaScript starts
-// extracting something it used to miss: stores written before carry no
-// version, or an older one, and re-ingest those files once.
-const JS_ANALYZER_VERSION = 'js:3'; // 3: JSX fallback (tree-sitter TSX grammar) when acorn cannot parse — see extract()
 function analyzerVersionFor(path) {
     const ext = extensionFor(path);
     if (ext) return ext.version;
-    if (langOf(path) === 'javascript') {
-        // Folds in the TSX grammar/query version too: EVERY JS-family file
-        // is a candidate for the fallback (acorn failing is the only
-        // signal, discovered at parse time, not ahead of it), so a grammar
-        // or query bump must force a reparse of a plain, acorn-only file
-        // just as readily as one that actually uses the fallback today.
-        return `${JS_ANALYZER_VERSION}+jsx:${treesitter.jsxFallbackVersionTag()}`;
-    }
-    return treesitter.currentVersionFor(path);
+    return nativeVersionFor(path);
 }
 
-// How far in to keep naming things.
-//
-// Top level alone was not enough. The largest units in a codebase like this
-// one are factory closures — createIndex is 407 lines and RETURNS the object
-// holding find, read and edit — and addressing only the closure is addressing
-// nothing: you cannot read `find` without reading all 407 lines, and you
-// cannot edit it without sending them all back. Three levels reach the method
-// on the object a factory returns, and the helper inside that method; past
-// there a function is almost always an inline callback with no name worth
-// holding.
-const MAX_DEPTH = 3;
-
-function extractJavaScript(path, src) {
-    const ast = parseSource(src);
-
-    const symbols = [];
-    const imports = [];
-    const exports = [];
-
-    // Every symbol carries a PATH: `createIndex.find` for a nested one, its
-    // bare name for a top-level one. The path is what makes a nested symbol
-    // addressable — a name alone cannot separate the four `execute`s in a
-    // file, and guessing between them is the one thing this index must not do.
-    const push = (name, kind, node, { parent = null, prevEnd = 0, ...extra } = {}) => {
-        const symPath = parent ? `${parent}.${name}` : name;
-        symbols.push({
-            name,
-            kind,
-            path: symPath,
-            ...(parent ? { parent } : {}),
-            // The EXACT bytes of the symbol, character-addressed. For a
-            // method inside an object literal this is `plus(by) { ... }` —
-            // no leading indentation, no trailing comma — because that is
-            // where acorn's own node boundary falls. A line range would own
-            // the whitespace before it and the punctuation after it, which
-            // is exactly what belongs to the enclosing object, not to the
-            // method.
-            start: node.start,
-            end: node.end,
-            lineStart: node.loc.start.line,
-            lineEnd: node.loc.end.line,
-            doc: docAbove(src, node, prevEnd),
-            ...extra,
-        });
-        return symPath;
-    };
-
-    const fnOf = (n) =>
-        n &&
-        (n.type === 'FunctionDeclaration' || n.type === 'FunctionExpression' || n.type === 'ArrowFunctionExpression')
-            ? n
-            : null;
-
-    // The function-valued members of an object literal — the shape every
-    // factory here returns, and the one that was completely invisible.
-    function members(obj, parent, depth) {
-        if (!obj || obj.type !== 'ObjectExpression' || depth > MAX_DEPTH) return;
-        let prevEnd = obj.start;
-        for (const p of obj.properties || []) {
-            const name = memberKeyName(src, p);
-            const fn = fnOf(p.value);
-            if (name && fn) {
-                const child = push(name, 'method', p, {
-                    parent,
-                    prevEnd,
-                    signature: signatureOf(src, { init: p.value }, name),
-                });
-                descend(fn, child, depth + 1);
-            }
-            prevEnd = p.end;
-        }
-    }
-
-    // Into a function body: its inner declarations, or the object it returns.
-    function descend(fn, parent, depth) {
-        if (!fn || !fn.body || depth > MAX_DEPTH) return;
-        // const make = () => ({ ... }) — a factory with no block at all.
-        if (fn.body.type === 'ObjectExpression') return members(fn.body, parent, depth);
-        if (fn.body.type !== 'BlockStatement') return;
-        let prevEnd = fn.body.start;
-        for (const st of fn.body.body) {
-            statement(st, parent, depth, prevEnd);
-            prevEnd = st.end;
-        }
-    }
-
-    // `const a = …, b = () => {}` — one symbol per named declarator. `span` is
-    // the node whose bytes the symbol owns: the declaration itself, or the
-    // `export …` statement wrapping it, so that editing an exported const by
-    // name replaces the `export` keyword along with it (the same way an
-    // exported function's span already does). Every declarator of one
-    // statement shares that statement's span — splitting a multi-declarator
-    // statement into per-declarator byte ranges would hand an edit a range
-    // that is not a statement.
-    function variables(decl, span, parent, depth, prevEnd, exported = false) {
-        for (const d of decl.declarations) {
-            const init = d.init || {};
-            // `const { a, b: c } = require('./x')` — the commonest CommonJS
-            // import there is. Its bindings are names in the TARGET file, the
-            // same `names` an ESM `import { a, b as c }` carries.
-            if (
-                !parent &&
-                !exported &&
-                d.id &&
-                d.id.type === 'ObjectPattern' &&
-                init.type === 'CallExpression' &&
-                init.callee &&
-                init.callee.name === 'require'
-            ) {
-                const from = init.arguments[0] && init.arguments[0].value;
-                const names = d.id.properties
-                    .filter((p) => p.type === 'Property' && p.value && p.value.type === 'Identifier')
-                    .map((p) => ({ local: p.value.name, imported: p.key.name || p.key.value }));
-                if (typeof from === 'string') imports.push({ local: null, from, line: decl.loc.start.line, names });
-                continue;
-            }
-            if (!d.id || d.id.type !== 'Identifier') continue;
-            // A top-level require() is an import edge, not a symbol. An
-            // EXPORTED one is a binding the file exposes, so it stays a symbol.
-            if (
-                !parent &&
-                !exported &&
-                init.type === 'CallExpression' &&
-                init.callee &&
-                init.callee.name === 'require'
-            ) {
-                const from = init.arguments[0] && init.arguments[0].value;
-                if (from) imports.push({ local: d.id.name, from, line: decl.loc.start.line });
-                continue;
-            }
-            const fn = fnOf(init);
-            // Inside a scope only FUNCTIONS earn a name. A local
-            // `const rows = []` is not something anyone addresses, and
-            // indexing every one of them would bury the things that are.
-            if (!fn && parent) continue;
-            const child = push(d.id.name, fn ? 'function' : 'const', span, {
-                parent,
-                prevEnd,
-                ...(fn ? { signature: signatureOf(src, d, d.id.name) } : {}),
-                ...(exported ? { exported: true } : {}),
-            });
-            if (fn) descend(fn, child, depth + 1);
-        }
-    }
-
-    // The names a binding pattern introduces: `{ a, b: c, ...d }` → a, c, d.
-    function boundNames(p, out = []) {
-        if (!p) return out;
-        if (p.type === 'Identifier') out.push(p.name);
-        else if (p.type === 'ObjectPattern')
-            for (const q of p.properties) boundNames(q.type === 'RestElement' ? q.argument : q.value, out);
-        else if (p.type === 'ArrayPattern') for (const q of p.elements) boundNames(q, out);
-        else if (p.type === 'RestElement') boundNames(p.argument, out);
-        else if (p.type === 'AssignmentPattern') boundNames(p.left, out);
-        return out;
-    }
-
-    // One statement, at any depth. `parent` null means top level, which is the
-    // only place imports, exports and module.exports can appear.
-    function statement(node, parent, depth, prevEnd) {
-        if (node.type === 'FunctionDeclaration' && node.id) {
-            const child = push(node.id.name, 'function', node, {
-                parent,
-                prevEnd,
-                signature: signatureOf(src, node, node.id.name),
-            });
-            descend(node, child, depth + 1);
-            return;
-        }
-        if (node.type === 'ClassDeclaration' && node.id) {
-            const child = push(node.id.name, 'class', node, { parent, prevEnd });
-            for (const m of node.body.body || []) {
-                const name = memberKeyName(src, m);
-                if (!name || depth + 1 > MAX_DEPTH) continue;
-                push(name, 'method', m, { parent: child, signature: signatureOf(src, { init: m.value }, name) });
-                descend(m.value, `${child}.${name}`, depth + 2);
-            }
-            return;
-        }
-        if (node.type === 'VariableDeclaration') {
-            variables(node, node, parent, depth, prevEnd);
-            return;
-        }
-        if (parent) {
-            // The factory's product: `return { find() {...}, read() {...} }`.
-            if (node.type === 'ReturnStatement') members(node.argument, parent, depth);
-            return;
-        }
-        if (node.type === 'ImportDeclaration') {
-            // F3: `names` is the LOCAL binding each specifier introduces
-            // (what refs() compares a hit's text against) paired with its
-            // pre-alias name in the source module (what the TARGET file
-            // defines) — same shape treesitter.js's generic imports reader
-            // produces for the other languages, so edges.js's resolver
-            // never has to know which extractor a file went through.
-            imports.push({
-                local: null,
-                from: node.source.value,
-                line: node.loc.start.line,
-                esm: true,
-                names: importNames(node.specifiers),
-            });
-        } else if (node.type === 'ExportNamedDeclaration' || node.type === 'ExportDefaultDeclaration') {
-            const decl = node.declaration;
-            const isDefault = node.type === 'ExportDefaultDeclaration';
-            if (decl && decl.type === 'VariableDeclaration') {
-                // `export const X = …` — the same symbols a bare `const`
-                // would produce, spanning the whole export statement.
-                variables(decl, node, null, depth, prevEnd, true);
-                for (const d of decl.declarations) exports.push(...boundNames(d.id));
-            } else if (decl && decl.id) {
-                const child = push(decl.id.name, decl.type === 'ClassDeclaration' ? 'class' : 'function', node, {
-                    prevEnd,
-                    exported: true,
-                    ...(decl.type === 'FunctionDeclaration' ? { signature: signatureOf(src, decl, decl.id.name) } : {}),
-                });
-                descend(decl, child, depth + 1);
-                exports.push(isDefault ? 'default' : decl.id.name);
-            } else if (decl && decl.type === 'ObjectExpression') {
-                // `export default { ... }` — the object has no `.id`, so
-                // nothing is pushed for the export itself (same as any other
-                // anonymous default), but its function-valued members ARE
-                // addressable, same as `members()` already makes a factory's
-                // RETURNED object addressable. Before this, an object like
-                // this (which is exactly what an OKJS component is) produced
-                // zero symbols — ext-okjs.js's "one symbol per component"
-                // gap started here. Only function-valued members earn a
-                // name, the same rule `members()` applies everywhere else:
-                // a plain data property (`tag: 'x'`, a template literal) is
-                // not something a caller addresses by name.
-                members(decl, null, depth);
-                if (isDefault) exports.push('default');
-            } else if (isDefault) exports.push('default');
-            for (const s of node.specifiers || []) if (s.exported) exports.push(s.exported.name || s.exported.value);
-            if (node.source)
-                imports.push({
-                    local: null,
-                    from: node.source.value,
-                    line: node.loc.start.line,
-                    esm: true,
-                    reexport: true,
-                    // `export { x as y } from './m'` keeps `local` as the
-                    // SOURCE's own name (`x`, what './m' defines) — nothing
-                    // in this file binds `y`, so `local` is what importers()
-                    // following the re-export one hop (F3) needs to match
-                    // against './m''s symbols, not this statement's alias.
-                    names: (node.specifiers || []).map((s) => ({
-                        local: s.local.name,
-                        imported: s.exported ? s.exported.name || s.exported.value : s.local.name,
-                    })),
-                });
-        } else if (node.type === 'ExportAllDeclaration') {
-            // `export * from './m'` / `export * as ns from './m'` — a
-            // re-export edge like `export { x } from`; the namespace form
-            // also introduces one exported name.
-            if (node.exported) exports.push(node.exported.name || node.exported.value);
-            imports.push({
-                local: null,
-                from: node.source.value,
-                line: node.loc.start.line,
-                esm: true,
-                reexport: true,
-                names: null,
-            });
-        } else if (node.type === 'ExpressionStatement') {
-            const e = node.expression;
-            if (e.type === 'AssignmentExpression' && /^module\.exports/.test(src.slice(e.left.start, e.left.end))) {
-                if (e.right.type === 'ObjectExpression') {
-                    for (const p of e.right.properties) {
-                        const n = p.key && (p.key.name || p.key.value);
-                        if (n) exports.push(n);
-                    }
-                } else if (e.right.type === 'Identifier') exports.push(e.right.name);
-                push('module.exports', 'exports', node, { prevEnd, exports: exports.slice() });
-            }
-        }
-    }
-
-    let prevEnd = 0;
-    for (const node of ast.body) {
-        statement(node, null, 0, prevEnd);
-        prevEnd = node.end;
-    }
-
-    // Mark the symbols the file actually exposes. Only top-level ones: a
-    // method called `find` inside a factory is not the file's exported `find`.
-    const exported = new Set(exports);
-    for (const s of symbols) if (!s.parent && exported.has(s.name)) s.exported = true;
-
-    return { symbols, imports, exports, references: collectCalls(ast) };
-}
-
-registerExtractor('javascript', extractJavaScript);
-
-// TypeScript, Python, Go, Rust: one generic tree-sitter extractor, data per
-// language (see treesitter.js and docs/WORKPLAN.md Phase F) — no AST-walking
-// code added here. `extractFor` returns null when the grammar is not loaded
-// for this process (optional runtime absent, or workspace.js never called
-// treesitter.preload() for this language); that throw is caught by extract()
-// above and reproduces EXACTLY the "no extractor" message the generic path
-// gives a language with nothing registered at all — grammars missing must
-// look identical to grammars never having been written.
-for (const id of ['typescript', 'python', 'go', 'rust', 'php', 'java', 'csharp', 'c', 'cpp']) {
-    registerExtractor(id, (p, src) => {
-        const result = treesitter.extractFor(id, p, src);
-        if (!result) throw new Error(`${id} — searchable, no symbol extractor yet`);
-        return result;
-    });
-}
+// Throws on a syntax error with acorn's wording. The AST itself cannot cross the native boundary:
+// the result is a stub { type: 'Program', sourceType, body: [] }.
+const parseSource = (src) => nativeParseSource(src);
 
 module.exports = {
     extract,
@@ -837,10 +161,5 @@ module.exports = {
     TEXT_MAX,
     parseSource,
     analyzerVersionFor,
-    // Exposed so ext-okjs.js can run the SAME generic extractor on a
-    // `.ok.js`/`.ok.mjs` file's JavaScript (or a `.ok.html` file's <script>
-    // block) and nest its symbols under the component tag — required
-    // lazily there, never at this module's own load time, since this file
-    // requires ext-okjs.js above to register it.
-    extractJavaScript,
+    extractJavaScript: (path, src) => extractJavaScript(path, src),
 };

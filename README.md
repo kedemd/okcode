@@ -8,7 +8,17 @@ Agentless workspace tools for code: **find, read and edit code by name** in loca
 - **Anywhere** — okcode never opens a connection. You hand it an **access facade** (list / stat / read / commit). okcode ships two: plain local `fs`, and a `shell` facade that speaks bash/PowerShell over any `run(script, stdin)` — so `ssh`, `docker exec`, `kubectl exec` reach a remote workspace with **nothing installed on it**.
 - **No copies** — the index (symbols, full-text postings, vectors) lives in okdb; file content is never stored. okdb reads it through the facade when indexing and when showing a result ([resolved fields](https://github.com/kedemd/okdb/blob/main/docs/resolved-fields.md)).
 
-> Status: 0.1. Depends on [`@kedem/okdb`](https://www.npmjs.com/package/@kedem/okdb) `^2.3.0` from npm (resolved fields, reconcile-based embeddings).
+> Status: **1.0.0**. okcode 1.0 is a native (Rust) implementation behind the same JavaScript API as 0.2; it requires
+> [`@kedem/okdb`](https://www.npmjs.com/package/@kedem/okdb) `^3` and talks to okdb through okdb's stable C bridge, sharing
+> the host's okdb instance instead of opening its own. Upgrading from 0.2: [docs/UPGRADING.md](docs/UPGRADING.md). What changed
+> and by how much: [CHANGELOG.md](CHANGELOG.md).
+
+## Requirements
+
+- Node.js ≥ 20 (for the library and the `okcode` command), or no Node at all for the standalone native `okcode` binary.
+- `@kedem/okdb` ^3 (a normal dependency; npm dedupes it with your own). A host that passes its own `db` must pass an
+  okdb **v3** instance; a v2 `db` is refused (`OKCODE_OKDB_V3_REQUIRED`) — v2 hosts stay on okcode 0.2.
+- A prebuilt native addon for the platform: 1.0.0 bundles linux-x64 (glibc 2.28+: Debian 11+, Ubuntu 20.04+, RHEL 8+). Other platforms fail with `OKCODE_UNSUPPORTED_PLATFORM`.
 
 ## Quick look
 
@@ -22,10 +32,10 @@ const oc = await okcode.open({
 });
 
 // A local folder
-await oc.addWorkspace('app', { access: okcode.access.localFs('/home/me/app') });
+await oc.addWorkspace('app', { access: okcode.access.localFs('/work/app') });
 
 // A huge repo you only ever ask by name: skip the (bigger) content index
-await oc.addWorkspace('monorepo', { access: okcode.access.localFs('/home/me/monorepo'), fts: 'symbols' });
+await oc.addWorkspace('monorepo', { access: okcode.access.localFs('/work/monorepo'), fts: 'symbols' });
 
 // A remote folder — okcode supplies the scripts, you supply the transport
 await oc.addWorkspace('prod-api', {
@@ -71,8 +81,8 @@ See `okcode --help`.
 
 - [docs/DESIGN.md](docs/DESIGN.md) — what okcode is, its layers, storage, embedders, management surface, and the decisions behind them.
 - [docs/ACCESS.md](docs/ACCESS.md) — the access facade contract (implement it to reach a new kind of workspace).
-
-Lineage: extracted from the brain's code index (`brain/src/codeindex`, spec `brain/docs/CODE-INDEX-SPEC.md`), which remains the reference for edit-safety and freshness rationale.
+- [docs/UPGRADING.md](docs/UPGRADING.md) — 0.2 → 1.0 for hosts.
+- [CHANGELOG.md](CHANGELOG.md) — what changed in each release.
 
 ## License
 

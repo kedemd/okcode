@@ -97,6 +97,9 @@ describe('okcode.open({ path })', () => {
             assert.equal(st.active, 'fake');
             const one = await oc.status('app');
             assert.equal(one.workspaces.length, 1);
+            // no BigInt may leak out of the async path (JSON-safe, timestamps are Numbers)
+            assert.doesNotThrow(() => JSON.stringify(one));
+            for (const x of one.workspaces) if (x.lastSync != null) assert.equal(typeof x.lastSync, "number");
             assert.equal(one.workspaces[0].files, w.files);
             await assert.rejects(oc.status('nope'), { code: 'OKCODE_UNKNOWN_WORKSPACE' });
         } finally {

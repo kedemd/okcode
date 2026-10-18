@@ -1,0 +1,17 @@
+[package]
+name = "okcode-core"
+version = "0.0.1"
+edition.workspace = true
+publish.workspace = true
+
+# store + workspace over okdb's C bridge (okcode-okdb): no okdb crates in the build.
+[dependencies]
+okcode-okdb = { path = "../okcode-okdb" }
+okcode-analysis = { path = "../okcode-analysis" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+indexmap = "2"
+sha1 = "0.10"
+regex = "1"
+# perf: the cold scan's bounded parse pool (workspace/scan.rs)
+rayon = "1.12"

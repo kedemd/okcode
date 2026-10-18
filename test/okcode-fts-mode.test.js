@@ -9,7 +9,7 @@ const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
-const okcode = require('../src/okcode');
+const okcode = require('../lib/okcode');
 const { localFs } = okcode.access;
 const { writeFixture, tmpRoot } = require('./fixtures/code-fixture');
 

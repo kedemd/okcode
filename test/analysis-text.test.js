@@ -7,7 +7,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const T = require('../src/analysis/text');
+const T = require('../lib/analysis/text');
 
 test('decode: lossless only when the UTF-8 round trip is byte-identical', () => {
     assert.ok(T.decode(Buffer.from('const x = "—…é";', 'utf8')).lossless);

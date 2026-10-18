@@ -1,15 +1,17 @@
 'use strict';
-// The generic tree-sitter extractor (F1) and syntax gate (F2) — one engine,
+// The generic tree-sitter extractor and syntax gate — one engine,
 // data per language. Asserts the CONTRACT the overrides exist for (see each
-// grammars/<lang>/tags.local.scm for what upstream's tags.scm misses and
-// why), nesting/parent, exported-by-convention, dedupe, and the "runtime
-// absent" degrade path parse.js's extract() relies on.
+// queries/<lang>/tags.local.scm in the tree-sitter crate for what upstream's
+// tags.scm misses and why), nesting/parent, exported-by-convention and dedupe,
+// through the public analysis API.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const treesitter = require('../src/analysis/treesitter');
-const { extract, langOf } = require('../src/analysis/parse');
-const { validateSource } = require('../src/analysis/validate');
+const { extract, langOf } = require('../lib/analysis/parse');
+const { validateSource } = require('../lib/analysis/validate');
+
+// <grammar version>[+<bundled grammar>]:q<queries>.<extractor>
+const ANALYZER_VERSION = /^\d+\.\d+\.\d+\S*:q\d+\.\d+$/;
 
 const TS = [
     '// Doc comment for Shape interface.',
@@ -263,21 +265,15 @@ const CPP = [
 
 const CPP_BROKEN = ['class Broken {', '  void method(int a {', '    return;', '  }', '};', ''].join('\n');
 
-test.before(async () => {
-    await Promise.all(
-        ['typescript', 'python', 'go', 'rust', 'php', 'java', 'csharp', 'c', 'cpp'].map((id) => treesitter.ensureLanguage(id)),
-    );
-});
-
-test('langIdForPath maps the F1 extensions, and only those', () => {
-    assert.equal(treesitter.langIdForPath('x.ts'), 'typescript');
-    assert.equal(treesitter.langIdForPath('x.tsx'), 'typescript');
-    assert.equal(treesitter.langIdForPath('x.mts'), 'typescript');
-    assert.equal(treesitter.langIdForPath('x.cts'), 'typescript');
-    assert.equal(treesitter.langIdForPath('x.py'), 'python');
-    assert.equal(treesitter.langIdForPath('x.go'), 'go');
-    assert.equal(treesitter.langIdForPath('x.rs'), 'rust');
-    assert.equal(treesitter.langIdForPath('x.js'), null);
+test('the tree-sitter extensions map to their languages', () => {
+    assert.equal(langOf('x.ts'), 'typescript');
+    assert.equal(langOf('x.tsx'), 'typescript');
+    assert.equal(langOf('x.mts'), 'typescript');
+    assert.equal(langOf('x.cts'), 'typescript');
+    assert.equal(langOf('x.py'), 'python');
+    assert.equal(langOf('x.go'), 'go');
+    assert.equal(langOf('x.rs'), 'rust');
+    assert.equal(langOf('x.js'), 'javascript');
 });
 
 test('TypeScript: class/function/arrow-const/type/enum/method — all of upstream\'s gaps', () => {
@@ -299,7 +295,7 @@ test('TypeScript: class/function/arrow-const/type/enum/method — all of upstrea
     assert.equal(byPath.get('notExported').kind, 'function');
     assert.ok(!byPath.get('notExported').exported);
     assert.equal(byPath.get('Color').kind, 'enum');
-    assert.equal(r.analyzerVersion, treesitter.currentVersionFor('sample.ts'));
+    assert.match(r.analyzerVersion, ANALYZER_VERSION);
     assert.ok(Array.isArray(r.references) && r.references.some((x) => x.name === 'Circle'));
 });
 
@@ -372,7 +368,7 @@ test('PHP: namespace/class/interface/trait/enum/function/method/constant — Cla
     assert.equal(byPath.get('Suit').kind, 'enum');
     assert.equal(byPath.get('Greets').kind, 'interface'); // trait, same kind as an interface
     assert.equal(byPath.get('Named').kind, 'interface');
-    assert.equal(r.analyzerVersion, treesitter.currentVersionFor('sample.php'));
+    assert.match(r.analyzerVersion, ANALYZER_VERSION);
 });
 
 test('Java: package/class/interface/enum/record/method/constructor/static-final-constant — Class.method path, public/package-private visibility', () => {
@@ -396,7 +392,7 @@ test('Java: package/class/interface/enum/record/method/constructor/static-final-
     assert.equal(byPath.get('Named').kind, 'interface');
     assert.equal(byPath.get('Point').kind, 'class'); // record
     assert.ok(!byPath.get('Suit').exported, 'top-level type with no `public` modifier');
-    assert.equal(r.analyzerVersion, treesitter.currentVersionFor('sample.java'));
+    assert.match(r.analyzerVersion, ANALYZER_VERSION);
 });
 
 test('C#: namespace/struct/enum/class/method/property — dotted namespace containment, public/default visibility', () => {
@@ -415,7 +411,7 @@ test('C#: namespace/struct/enum/class/method/property — dotted namespace conta
     assert.equal(byPath.get('App.Models.User.Age').kind, 'property');
     assert.ok(byPath.get('App.Models.User.Age').exported);
     assert.ok(!byPath.get('App.Models.User.Secret').exported, 'private method');
-    assert.equal(r.analyzerVersion, treesitter.currentVersionFor('sample.cs'));
+    assert.match(r.analyzerVersion, ANALYZER_VERSION);
 });
 
 test('C: macro/typedef/enum/function — non-static-at-file-scope visibility, full span for a function (not just its declarator)', () => {
@@ -433,7 +429,7 @@ test('C: macro/typedef/enum/function — non-static-at-file-scope visibility, fu
     // declarator upstream's own tags.scm captures on its own.
     assert.ok(byPath.get('add').signature.startsWith('int add('));
     assert.equal(byPath.get('add').lineEnd, byPath.get('add').lineStart + 2);
-    assert.equal(r.analyzerVersion, treesitter.currentVersionFor('sample.c'));
+    assert.match(r.analyzerVersion, ANALYZER_VERSION);
 });
 
 test('C++: namespace/class/method (in-class and out-of-line)/enum/template/attribute — Class.method path incl. Foo::bar, non-static-at-file-scope visibility', () => {
@@ -459,7 +455,7 @@ test('C++: namespace/class/method (in-class and out-of-line)/enum/template/attri
     assert.ok(byPath.get('App.Wrapper').start < CPP.indexOf('class Wrapper'), 'span widened back to the template line');
     assert.ok(byPath.get('App.Wrapper').signature.startsWith('class Wrapper'));
     assert.ok(!byPath.get('internalHelper').exported, 'static — internal linkage');
-    assert.equal(r.analyzerVersion, treesitter.currentVersionFor('sample.cpp'));
+    assert.match(r.analyzerVersion, ANALYZER_VERSION);
 });
 
 test('signature: the full definition up to its BODY, not just the first line — multi-line params, per language', () => {
@@ -473,8 +469,8 @@ test('signature: the full definition up to its BODY, not just the first line —
         '',
     ].join('\n');
     const tsSym = extract('multi.ts', ts).symbols.find((s) => s.name === 'createUser');
-    // `export` wraps the declaration one level up (see the typescript entry
-    // in treesitter.js's LANGUAGES table) — the signature, like the
+    // `export` wraps the declaration one level up (the typescript entry of
+    // the tree-sitter crate's language table) — the signature, like the
     // definition's span, starts at the function itself.
     assert.equal(tsSym.signature, 'export async function createUser(name: string, age: number): Promise<User>');
 
@@ -564,31 +560,6 @@ test('F2: ERROR/MISSING nodes become treesitter-syntax diagnostics, offsets usab
     ]) {
         const v = validateSource({ rel, text: src });
         assert.ok(!v.diagnostics.some((d) => d.source === 'treesitter-syntax'), `${rel} should be clean`);
-    }
-});
-
-test('runtime unavailable (injected loader): extract() degrades to "searchable, no symbol extractor yet", never throws', async () => {
-    treesitter._resetForTest({
-        loader: () => {
-            throw new Error('simulated: web-tree-sitter not installed');
-        },
-    });
-    try {
-        const r = extract('x.py', PY);
-        assert.equal(r.indexed, true, 'still searchable — isTextual does not depend on the grammar');
-        assert.equal(r.parsed, false);
-        assert.deepEqual(r.symbols, []);
-        assert.match(r.reason, /no symbol extractor yet/);
-
-        // The syntax gate degrades the same way: no grammar, no diagnostics —
-        // not a false "no errors", a true "nothing was checked".
-        const v = validateSource({ rel: 'x.py', text: PY_BROKEN });
-        assert.ok(!v.diagnostics.some((d) => d.source === 'treesitter-syntax'));
-    } finally {
-        treesitter._resetForTest();
-        await Promise.all(
-            ['typescript', 'python', 'go', 'rust', 'php', 'java', 'csharp', 'c', 'cpp'].map((id) => treesitter.ensureLanguage(id)),
-        );
     }
 });
 

@@ -2,9 +2,9 @@
 // JSX support (DESIGN §12/§6/§3 amendment): acorn cannot parse JSX at all, so
 // before this fix every `.jsx` file, and every `.js`/`.mjs`/`.cjs` file
 // written with JSX in it, got `parsed: false` and no symbols. The fix is a
-// tree-sitter TSX fallback (treesitter.js's 'typescript' grammar, forced
+// tree-sitter TSX fallback (the 'typescript' grammar's TSX dialect, forced
 // regardless of the path's own extension) that only runs when acorn fails —
-// see parse.js's extract() and treesitter.js's extractJsxFallback.
+// see extract() in the analysis API.
 //
 // Three layers, same split the rest of the suite uses: raw extraction
 // (parse.js, no workspace), resolved edges/refs (a real workspace), and the
@@ -16,19 +16,10 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const OKDB = require('@kedem/okdb');
-const { extract } = require('../src/analysis/parse');
-const treesitter = require('../src/analysis/treesitter');
-const { openWorkspace } = require('../src/workspace');
-const { openStore } = require('../src/store');
-const { localFs } = require('../src/access');
-
-before(async () => {
-    // The fallback needs the 'typescript' grammar (it carries the .tsx wasm
-    // too) resident before extract()'s synchronous call can use it — the
-    // same seam treesitter.js's module comment documents for every other
-    // tree-sitter language.
-    await treesitter.ensureLanguage('typescript');
-});
+const { extract } = require('../lib/analysis/parse');
+const { openWorkspace } = require('../lib/workspace');
+const { openStore } = require('../lib/store');
+const { localFs } = require('../lib/access');
 
 const JSX_COMPONENT = [
     "import React from 'react';",
@@ -101,7 +92,7 @@ describe('JSX extraction (parse.js extract(), no workspace)', () => {
         assert.ok(reactImports.some((i) => (i.names || []).some((n) => n.local === 'React')), 'the ESM default import');
         assert.ok(
             reactImports.some((i) => (i.names || []).some((n) => n.local === 'useState')),
-            'the require() destructure (grammars/typescript/imports.scm — added for this fallback path)',
+            'the require() destructure (the typescript imports.scm query, which covers this fallback path)',
         );
     });
 

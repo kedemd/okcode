@@ -11,8 +11,8 @@ const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
-const okcode = require('../src/okcode');
-const { createTools } = require('../src/tools');
+const okcode = require('../lib/okcode');
+const { createTools } = require('../lib/tools');
 const { writeFixture, FIXTURE_FILES, tmpRoot, facades, counted } = require('./fixtures/code-fixture');
 
 for (const fac of facades()) {

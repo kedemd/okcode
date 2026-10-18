@@ -10,10 +10,10 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const OKDB = require('@kedem/okdb');
-const { openWorkspace } = require('../src/workspace');
-const { openStore } = require('../src/store');
-const { localFs, shell } = require('../src/access');
-const { createTools } = require('../src/tools');
+const { openWorkspace } = require('../lib/workspace');
+const { openStore } = require('../lib/store');
+const { localFs, shell } = require('../lib/access');
+const { createTools } = require('../lib/tools');
 const { writeFixture, tmpRoot, facades } = require('./fixtures/code-fixture');
 
 const PKG = 'node_modules/@kedem/okjs';
@@ -319,6 +319,6 @@ for (const fac of FACADES) {
 // the bash one (root, under, limit, skip names…); with no pwsh here, at least
 // keep the scripts in step textually.
 it('powershell list script reads the subtree and limit fields', () => {
-    const ps = fs.readFileSync(path.join(__dirname, '../src/access/scripts/powershell/list.ps1'), 'utf8');
+    const ps = fs.readFileSync(path.join(__dirname, '../crates/okcode-access/scripts/powershell/list.ps1'), 'utf8');
     assert.match(ps, /\$under = NextField\s*\n\$limit = \[int\]\(NextField\)/);
 });

@@ -1,7 +1,7 @@
 'use strict';
-// F3 (resolved edges) and F4 item 3 (okjs component usage) — WORKPLAN
-// Phase F. One fixture repo per language, covering the resolution rule that
-// repo exercises (DESIGN §12): relative + tsconfig `paths` for TypeScript, a
+// Resolved edges and okjs component usage. One fixture repo per language,
+// covering the resolution rule that repo exercises (DESIGN §12): relative +
+// tsconfig `paths` for TypeScript, a
 // package-relative import for Python, a module import for Go, a `crate::`
 // path for Rust, a barrel re-export for JS, and an okjs component tag.
 // Also: refs() labels/ranking, importers(), and cache invalidation after an
@@ -14,10 +14,9 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const OKDB = require('@kedem/okdb');
-const { openWorkspace } = require('../src/workspace');
-const { openStore } = require('../src/store');
-const { localFs } = require('../src/access');
-const treesitter = require('../src/analysis/treesitter');
+const { openWorkspace } = require('../lib/workspace');
+const { openStore } = require('../lib/store');
+const { localFs } = require('../lib/access');
 
 function tmpRoot() {
     const base = fs.mkdtempSync(path.join(os.tmpdir(), 'okcode-edges-'));
@@ -99,7 +98,6 @@ describe('F3 resolved edges + F4.3 okjs component usage', () => {
             'src/app/widget.ts': 'export function thing() { return 2; }\n',
             'src/index.ts': "import { thing } from '@app/widget';\nexport function run() { return thing(); }\n",
         });
-        await treesitter.ensureLanguage('typescript');
         await ws.sync();
         const r = await ws.importers('src/app/widget.ts');
         assert.ok(r.ok);
@@ -115,7 +113,6 @@ describe('F3 resolved edges + F4.3 okjs component usage', () => {
             'pkg/util.py': 'def helper():\n    return 1\n',
             'pkg/main.py': 'from .util import helper\n\n\ndef run():\n    return helper()\n',
         });
-        await treesitter.ensureLanguage('python');
         await ws.sync();
         const r = await ws.importers('pkg/util.py');
         assert.ok(r.ok);
@@ -131,7 +128,6 @@ describe('F3 resolved edges + F4.3 okjs component usage', () => {
             'sub/util.go': 'package sub\n\nfunc Helper() int {\n\treturn 1\n}\n',
             'main.go': 'package main\n\nimport "example.com/app/sub"\n\nfunc run() int {\n\treturn sub.Helper()\n}\n',
         });
-        await treesitter.ensureLanguage('go');
         await ws.sync();
         const r = await ws.importers('sub/util.go');
         assert.ok(r.ok);
@@ -148,7 +144,6 @@ describe('F3 resolved edges + F4.3 okjs component usage', () => {
             'src/util.rs': 'pub fn helper() -> i32 {\n    1\n}\n',
             'src/caller.rs': 'use crate::util::helper;\n\npub fn run() -> i32 {\n    helper()\n}\n',
         });
-        await treesitter.ensureLanguage('rust');
         await ws.sync();
         const r = await ws.importers('src/util.rs');
         assert.ok(r.ok);
@@ -205,7 +200,6 @@ describe('F3 resolved edges + F4.3 okjs component usage', () => {
             'src/Controller.php':
                 "<?php\nnamespace App;\n\nuse App\\Services\\Mailer;\n\nrequire_once './boot.php';\n\nclass Controller {\n    public function run() {\n        \$m = new Mailer();\n        return \$m->send();\n    }\n}\n",
         });
-        await treesitter.ensureLanguage('php');
         await ws.sync();
         const r = await ws.importers('src/Services/Mailer.php');
         assert.ok(r.ok, JSON.stringify(r));
@@ -231,7 +225,6 @@ describe('F3 resolved edges + F4.3 okjs component usage', () => {
             'src/Controller.php':
                 '<?php\nnamespace App;\n\nuse App\\Services\\{Mailer, Logger as Log};\nuse Some\\Unconfigured\\Thing;\n\nclass Controller {}\n',
         });
-        await treesitter.ensureLanguage('php');
         await ws.sync();
         assert.deepEqual((await ws.importers('src/Services/Mailer.php')).importers.map((i) => i.file), ['src/Controller.php']);
         assert.deepEqual((await ws.importers('src/Services/Logger.php')).importers.map((i) => i.file), ['src/Controller.php']);
@@ -248,7 +241,6 @@ describe('F3 resolved edges + F4.3 okjs component usage', () => {
             'src/com/example/app/UsesStatic.java':
                 'package com.example.app;\n\nimport static com.example.lib.Foo.baz;\n\npublic class UsesStatic {}\n',
         });
-        await treesitter.ensureLanguage('java');
         await ws.sync();
         const foo = await ws.importers('src/com/example/lib/Foo.java');
         assert.ok(foo.ok, JSON.stringify(foo));
@@ -272,7 +264,6 @@ describe('F3 resolved edges + F4.3 okjs component usage', () => {
             'Controller.cs':
                 'using App.Services;\n\nnamespace App {\n    public class Controller {\n        void Run() { }\n    }\n}\n',
         });
-        await treesitter.ensureLanguage('csharp');
         await ws.sync();
         assert.deepEqual((await ws.importers('Services/Mailer.cs')).importers.map((i) => i.file), ['Controller.cs']);
         assert.deepEqual((await ws.importers('Services/Logger.cs')).importers.map((i) => i.file), ['Controller.cs']);
@@ -285,7 +276,6 @@ describe('F3 resolved edges + F4.3 okjs component usage', () => {
             'include/common.h': 'int shared(void);\n',
             'other/thing.c': '#include <common.h>\n\nint x(void) { return shared(); }\n',
         });
-        await treesitter.ensureLanguage('c');
         await ws.sync();
         assert.deepEqual((await ws.importers('src/util.h')).importers.map((i) => i.file), ['src/main.c']);
         // <stdio.h> matches no workspace path under a directory named
@@ -298,7 +288,6 @@ describe('F3 resolved edges + F4.3 okjs component usage', () => {
             'box.h': 'class Box {\npublic:\n  void bar();\n};\n',
             'box.cpp': '#include "box.h"\n\nvoid Box::bar() { return; }\n',
         });
-        await treesitter.ensureLanguage('cpp');
         await ws.sync();
         const r = await ws.read('box.cpp#Box.bar');
         assert.ok(r.ok, JSON.stringify(r));
@@ -359,7 +348,6 @@ describe('F3 resolved edges + F4.3 okjs component usage', () => {
             'sub/util.go': 'package sub\n\nfunc Helper() int {\n\treturn 1\n}\n',
             'main.go': 'package main\n\nimport "example.com/app/sub"\n\nfunc run() int {\n\treturn sub.Helper()\n}\n',
         });
-        await treesitter.ensureLanguage('go');
         await ws.sync();
         const hits = await ws.refs('Helper');
         const hit = hits.find((h) => h.file === 'main.go');

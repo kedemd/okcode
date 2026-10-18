@@ -1,0 +1,11 @@
+[package]
+name = "okcode-embed"
+version = "0.0.1"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde_json = "1"
+sha1 = "0.10"
+ureq = { version = "2", features = ["json"] }
+

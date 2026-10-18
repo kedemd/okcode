@@ -1,8 +1,7 @@
 'use strict';
 // The workspace end to end — scan, locate, read, edit — through each facade
 // (localFs, and the shell facade over real ssh), with a real okdb store behind
-// it: the configuration a host actually runs. Ported from the brain's
-// test/codeindex.js (index/store/edit sections; the pure-analysis sections live
+// it: the configuration a host actually runs (the pure-analysis cases live
 // in test/analysis-*.test.js).
 
 const { describe, it, before, after } = require('node:test');
@@ -10,8 +9,8 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const OKDB = require('@kedem/okdb');
-const { openWorkspace } = require('../src/workspace');
-const { openStore } = require('../src/store');
+const { openWorkspace } = require('../lib/workspace');
+const { openStore } = require('../lib/store');
 const { writeFixture, FIXTURE_FILES, tmpRoot, facades } = require('./fixtures/code-fixture');
 
 for (const fac of facades()) {
@@ -127,7 +126,7 @@ for (const fac of facades()) {
             const { ws } = await setup();
             const uses = await ws.refs('TAX_RATE');
             assert.ok(uses.length >= 1);
-            // F3: every use here is in lib/math.js, the same file that
+            // Every use here is in lib/math.js, the same file that
             // defines TAX_RATE, so each is labelled `local`, not `textual`
             // — the blanket "everything is textual" assumption predates
             // ranking/labelling.

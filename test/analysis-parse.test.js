@@ -1,7 +1,7 @@
 'use strict';
-// Symbol extraction on text — the parts of the brain's codeindex suite that
-// asserted what the parser finds (symbols, paths into closures, signatures,
-// docs, imports/exports, the .mjs fallback), without an index around them.
+// Symbol extraction on text — what the parser finds (symbols, paths into
+// closures, signatures, docs, imports/exports, the .mjs fallback), without an
+// index around them.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -14,7 +14,7 @@ const {
     registerExtractor,
     parseSource,
     TEXT_MAX,
-} = require('../src/analysis/parse');
+} = require('../lib/analysis/parse');
 
 const MATH = [
     "'use strict';",
@@ -142,10 +142,9 @@ test('imports: require edges, ESM imports and re-exports', () => {
     assert.deepEqual(esm.exports, ['d']);
 });
 
-// Known gap closed (WORKPLAN "Known gaps": "methods of an anonymous
-// `export default { … }` object are not extracted as symbols") — needed by
-// ext-okjs.js (F4 item 1) to nest a component's members under its tag, but
-// the fix lives here because it is not OKJS-specific: any plain `.mjs`
+// A closed gap ("methods of an anonymous `export default { … }` object are
+// not extracted as symbols") — needed by ext-okjs.js to nest a component's
+// members under its tag, but the fix lives here because it is not OKJS-specific: any plain `.mjs`
 // exporting an anonymous object factory had the same blind spot.
 test('export default { ... }: function-valued members become symbols, plain data does not', () => {
     const src = [

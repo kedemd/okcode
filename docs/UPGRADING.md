@@ -21,18 +21,24 @@ If you cannot move to okdb v3 yet, stay on okcode 0.2.
 
 okcode 1.0 is native. The package bundles the addon (and a standalone `okcode` binary) for linux-x64 with glibc 2.28+
 (Debian 11+, Ubuntu 20.04+, RHEL 8+); `OKCODE_NATIVE_BINARY` overrides it. On other platforms `require('@kedem/okcode')`
-throws `OKCODE_UNSUPPORTED_PLATFORM`.
+throws `OKCODE_UNSUPPORTED_PLATFORM`. Details: [NATIVE.md](NATIVE.md).
 
 ## 3. Things that differ
 
+- **Deep requires**: 1.0.0 keeps the JavaScript under `src/` as 0.2 did; later 1.x releases have it under `lib/`
+  (`@kedem/okcode/lib/tools`, and so on). `require('@kedem/okcode')` itself is unchanged.
 - **Validation messages** for JavaScript come from oxc, not acorn: a refused edit's diagnostic reads differently; which
-  edits are refused does not change.
+  edits are refused does not change. The diagnostic `source` names (`javascript-acorn`, `javascript-node-check`) and
+  `extract()`'s `extractor: 'acorn' | 'treesitter-tsx'` keep their 0.2 values.
 - **Grammars** are built in: the `web-tree-sitter` optional dependency and the "runtime unavailable" state are gone.
-  `treesitter.preload()` / `ensureLanguage()` only resolve (`ensureLanguage(id)` gives `{ id }`, or null for an
-  unknown id), and `LANGUAGES` entries carry only `id`, `exts`, `tsxExts` and the query versions.
+  In `lib/analysis/treesitter`, `preload()` / `ensureLanguage()` only resolve (`ensureLanguage(id)` gives `{ id }`, or
+  null for an unknown id), and `LANGUAGES` entries carry only `id`, `exts`, `tsxExts` and the query versions.
 - **`analysis` internals** that took live AST or tree-sitter objects (`chunk.walkInner`,
-  `treesitter.buildImports`) are not available; `analysis.parseSource` still throws on a syntax error but returns
-  a stub AST (`{ type: 'Program', sourceType, body: [] }`) instead of acorn's.
+  `treesitter.buildImports`, `lib/edges`' `createEdgeIndex`) throw; `analysis.parseSource` still throws on a syntax
+  error but returns a stub AST (`{ type: 'Program', sourceType, body: [] }`) instead of acorn's.
+- **`analysis.registerExtension` / `registerExtractor`** apply to `analysis.extract()` and `analysis.validateSource()`
+  in the calling process; a workspace's own indexing uses the built-in extractors (okjs included) and does not
+  consult them.
 - **A failed `open({ path })`** (a profile that cannot be translated, an unreadable persisted profile) now closes the
   store okcode opened, so the open can be retried on the same path.
 - **CLI**: the same commands and output; a standalone `okcode` binary is available that needs no Node. `OKCODE_VERBOSE`

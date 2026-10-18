@@ -1,0 +1,19 @@
+[package]
+name = "okcode-node"
+version = "0.0.1"
+edition.workspace = true
+publish.workspace = true
+
+# napi binding: the native side of lib/ (lib/native/native.js loads it) over okcode-core.
+[lib]
+crate-type = ["cdylib"]
+
+
+[dependencies]
+okcode-core = { path = "../okcode-core" }
+napi = { version = "=2.16.17", default-features = false, features = ["napi8", "serde-json"] }
+napi-derive = "=2.16.13"
+serde_json = { version = "1", features = ["preserve_order"] }
+
+[build-dependencies]
+napi-build = "=2.6.0"

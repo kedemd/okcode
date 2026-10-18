@@ -1,9 +1,9 @@
 'use strict';
-// Workspace-level proof for Phase F (localFs facade, real okdb store): a
-// .py/.go/.rs/.ts file is findable and readable BY SYMBOL PATH the same way
-// a .js file already is (F1), and the edit-safety gate refuses a syntax
+// Workspace-level proof for the tree-sitter languages (localFs facade, real
+// okdb store): a .py/.go/.rs/.ts file is findable and readable BY SYMBOL PATH
+// the same way a .js file is, and the edit-safety gate refuses a syntax
 // error introduced by an edit while still allowing an edit to an
-// ALREADY-broken file that does not add one (F2, same rule JS already gets
+// ALREADY-broken file that does not add one (same rule JS already gets
 // from compareDiagnostics — DESIGN §7).
 
 const { describe, it, before, after } = require('node:test');
@@ -12,10 +12,9 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const OKDB = require('@kedem/okdb');
-const { openWorkspace } = require('../src/workspace');
-const { openStore } = require('../src/store');
-const { localFs } = require('../src/access');
-const treesitter = require('../src/analysis/treesitter');
+const { openWorkspace } = require('../lib/workspace');
+const { openStore } = require('../lib/store');
+const { localFs } = require('../lib/access');
 
 const GO_SAMPLE = [
     'package sample',
@@ -149,14 +148,6 @@ describe('workspace over localFs: tree-sitter languages', () => {
         return { root, ws };
     }
 
-    before(async () => {
-        // Preload every grammar up front so this suite exercises the real
-        // extractor, not the "runtime not yet loaded" fallback — the fallback
-        // path is covered by analysis-treesitter.test.js's own test.
-        await Promise.all(
-            ['typescript', 'python', 'go', 'rust', 'java', 'csharp', 'c', 'cpp'].map((id) => treesitter.ensureLanguage(id)),
-        );
-    });
 
     it('find/outline/read by symbol path works for .py, .go, .rs and .ts', async () => {
         const { ws } = await setup();

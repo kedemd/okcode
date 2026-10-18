@@ -11,7 +11,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { splitList } = require('../src/grep');
+const { splitList } = require('../lib/grep');
 
 const USAGE = `okcode — find, read and edit code by name
 
@@ -235,7 +235,7 @@ async function installLicense() {
 let oc = null;
 let db = null;
 async function openOkcode() {
-    const okcode = require('../src/okcode');
+    const okcode = require('../lib/okcode');
     fs.mkdirSync(storeDir, { recursive: true });
     ignoreLocalStore();
     const { embedders, active } = embedderConfig();
@@ -278,7 +278,7 @@ async function openWs() {
 }
 
 function toolsFor(ws) {
-    const { createTools } = require('../src/tools');
+    const { createTools } = require('../lib/tools');
     return createTools({ workspace: async () => ws, workspaces: () => [{ id: ws.id, root }] });
 }
 

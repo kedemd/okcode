@@ -1,13 +1,13 @@
 'use strict';
 // A host's function embedder (a custom `embed`) survives a reopen: okdb restarts a store's persisted embedder
 // engines inside open(), so okcode registers the host's derived factory types BEFORE it (embedders.js preRegister).
-// Live (brain2, 2026-10-11): every restart logged "Unknown embedder type" for the workspace's engine.
+// Seen live: every restart logged "Unknown embedder type" for the workspace's engine.
 
 const { it } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
-const okcode = require('../src/okcode');
+const okcode = require('../lib/okcode');
 const { localFs } = okcode.access;
 const { writeFixture, tmpRoot } = require('./fixtures/code-fixture');
 

@@ -13,7 +13,7 @@ const {
     membersFromDts,
     reExports,
     declared,
-} = require('../src/analysis/packages');
+} = require('../lib/analysis/packages');
 
 function memoryAccess(files) {
     const calls = [];

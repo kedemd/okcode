@@ -2,13 +2,13 @@
 
 okcode never touches a filesystem or opens a connection itself. Every byte in or out of a workspace goes through an **access facade** — an object the host supplies when it adds a workspace. The facade is the whole contract between okcode and "where the files are".
 
-okcode ships four implementations (`okcode.access.localFs`, `okcode.access.shell`, and the read-only `okcode.access.fn` and `okcode.access.memory`); anything else — a remote API, an in-memory fixture — implements the same shape.
+okcode ships four implementations (`okcode.access.localFs`, `okcode.access.shell`, and the read-only `okcode.access.fn` and `okcode.access.memory`); anything else — a remote API, a database of files — implements the same shape.
 
 ## Conventions
 
 - **Async.** Every method returns a Promise: remote transports are not synchronous.
 - **Batched.** Methods that take paths take many — one round trip per call, not per file. A remote facade must not turn a batch into N round trips if it can avoid it.
-- **Paths are workspace-relative**, `/`-separated, no leading `/`, never containing `..` segments (`src/loop.js`). The facade maps them to its root. A facade MUST reject a path that escapes its root. Rejection is lexical (`..`, absolute, NUL) and follows the facade's path **dialect** (`checkPath`, exposed on the facade): on a POSIX facade (localFs off Windows, the bash shell) backslash and `X:` are ordinary filename characters, so `d:\x.html` is a valid relative name; on a Windows facade (PowerShell) drive-letter, rooted and UNC forms are absolute and `\` also separates. A name the scan cannot address is skipped with a scan warning (`stats().skipped`, `status()` `warnings`), never a failed workspace. A symlinked directory inside the workspace is followed.
+- **Paths are workspace-relative**, `/`-separated, no leading `/`, never containing `..` segments (`src/loop.js`). The facade maps them to its root. A facade MUST reject a path that escapes its root. Rejection is lexical (`..`, absolute, NUL) and follows the facade's path **dialect** (`checkPath`, exposed on the facade): on a POSIX facade (localFs off Windows, the bash shell) backslash and `X:` are ordinary filename characters, so `d:\x.html` is a valid relative name; on a Windows facade (PowerShell) drive-letter, rooted and UNC forms are absolute and `\` also separates. A name the scan cannot address is skipped with a scan warning (`stats().skipped`, `status()` `warnings`), never a failed workspace. The full walk lists no symlinks; `stat`/`read` follow one to a regular file, and `list({ under })` walks a symlinked directory that stays inside the root.
 - **Bytes, not text.** Content is `Buffer`. Text decoding is okcode's job, so a transport that mangles encodings (console codepages) cannot corrupt a file.
 - **Hashes** are uppercase hex SHA-1 of the file's bytes. They are computed **where the file is** (a remote facade hashes remotely — never pulls bytes just to hash them).
 - **mtime** is a number, compared only for equality against earlier values from the same facade (any stable unit; it is never interpreted as a date).
@@ -17,7 +17,7 @@ okcode ships four implementations (`okcode.access.localFs`, `okcode.access.shell
 
 ### `list({ skip, under, limit }) → [{ path, size, mtime }]`
 
-Every regular file under the root. `skip` is a list of directory names to prune at any depth (default: `node_modules .git .idea dist build coverage .next vendor`); it matches directories only (a _file_ named `dist` is listed). A FIXED list of known non-source dot-directories below the root is also pruned — `PRUNE_DOT_DIRS` in `src/access/common.js` (`.git .hg .svn .okcode .adcode .next .nuxt .svelte-kit .turbo .cache .parcel-cache .venv .tox .mypy_cache .pytest_cache .ruff_cache .gradle .idea .vs .terraform .serverless .yarn .pnpm-store .expo`), the same list the bash and PowerShell `list` scripts prune (`$dotprune` / `$dotPrune`) — **not** every dot-directory: one not on this list (`.github/`, `.storybook/`, an `app/.well-known/` route) is walked normally, same as any other directory, and left to `.gitignore` (already honored at the root) to decide. Symlinks are neither followed nor listed. Unreadable entries are skipped, never fatal — one locked file must cost that file, not the listing. No hashing.
+Every regular file under the root. `skip` is a list of directory names to prune at any depth (default `okcode.access.DEFAULT_SKIP`: `node_modules .git .idea dist build coverage .next vendor`); it matches directories only (a _file_ named `dist` is listed). A FIXED list of known non-source dot-directories below the root is also pruned — `okcode.access.PRUNE_DOT_DIRS` (`.git .hg .svn .okcode .adcode .next .nuxt .svelte-kit .turbo .cache .parcel-cache .venv .tox .mypy_cache .pytest_cache .ruff_cache .gradle .idea .vs .terraform .serverless .yarn .pnpm-store .expo`), the same list the bash and PowerShell `list` scripts prune (`$dotprune` / `$dotPrune`) — **not** every dot-directory: one not on this list (`.github/`, `.storybook/`, an `app/.well-known/` route) is walked normally, same as any other directory, and left to `.gitignore` (already honored at the root) to decide. Symlinks are neither followed nor listed. Unreadable entries are skipped, never fatal — one locked file must cost that file, not the listing. No hashing.
 
 - `under` (a workspace-relative directory or file) lists only that subtree, paths still relative to the root. `skip` and the dot-directory prune list apply **below** it, never to its own segments — that is how an explicitly named `node_modules/<pkg>` is reached at all. A file `under` lists that one file (if regular, readable and not a link); a missing one lists nothing. It is confined like every path: `checkPath` lexically, and by **real path** — a symlink on the way that resolves outside the root makes the call reject (`escapes the root`), never followed out. localFs and bash compare real paths (a symlinked directory that stays inside the root, as in a pnpm `node_modules`, is walked); PowerShell refuses any reparse point on the way.
 - `limit` stops the walk after that many files; the returned array then carries `truncated: true`. A facade may stop early on the target (bash: `head -z`) or cap after the transfer — either way at most `limit` rows come back.
@@ -59,11 +59,11 @@ okcode checks for these and degrades without them.
 
 ### `lock(path, id) → { ok: true, release() } | { ok: false, reason }`
 
-Advisory, cross-process lock around a commit (narrows the window between the compare and the rename against another okcode writer). Without it, `commit`'s compare-and-swap is the only guard. `release()` returns a Promise. The lock records the caller's `{ pid, host, startTime, id }`; a stale lock is broken only when its recorded host is the machine holding the files and its pid is provably dead there — never on elapsed time. A lock recorded by another host is always `locked` (release it manually).
+`path` is the lock file's own path, created exclusively (an existing file answers `{ ok: false, reason: 'locked' }`). Advisory, cross-process lock around a commit (narrows the window between the compare and the rename against another okcode writer). Without it, `commit`'s compare-and-swap is the only guard. `release()` returns a Promise. The lock records the caller's `{ pid, host, startTime, id }`; a stale lock is broken only when its recorded host is the machine holding the files and its pid is provably dead there — never on elapsed time. A lock recorded by another host is always `locked` (release it manually).
 
 ### `exec(command) → { ok, out }`
 
-Run a command in the workspace root (`out` = stdout, or stdout+stderr on failure; PowerShell merges stderr into `out`). Used only for opt-in checks (e.g. `node --check` on the target machine). **A capability, not a default:** a host grants it per workspace; okcode never needs it to find, read or edit.
+Run a command in the workspace root (`out` = stdout, or stdout+stderr on failure; PowerShell merges stderr into `out`). Used only by the opt-in syntax check (`ws.syntaxCheck(file)`, `okcode check`: `node --check` on the target machine). localFs and shell implement it; a host that does not want commands run on a target passes a facade without it. okcode never needs it to find, read or edit.
 
 ### `filesContaining(paths, text, { ignoreCase = false }) → Set<path> | null`
 
@@ -85,7 +85,7 @@ A facade over the host's own functions, for material that is not a folder anywhe
 
 ### `okcode.access.localFs(root)`
 
-Plain Node `fs`. Atomic commit = temp file + `rename`; compare-and-swap re-hashes before the rename. `lock` via an exclusive-create lock file.
+The local filesystem, read and written by okcode's native addon. Atomic commit = temp file + `rename`; compare-and-swap re-hashes before the rename. `lock` via an exclusive-create lock file.
 
 ### `okcode.access.shell({ root, run, dialect = 'bash' | 'powershell' })`
 
@@ -94,10 +94,12 @@ Speaks shell scripts over any transport. `run(script, stdin) → Promise<stdout>
 - Bytes travel as base64 in both directions; paths and payloads go on stdin, not interpolated into the script.
 - One script per method call; batches are one call.
 - Works against a stock bash (GNU or BSD userland) or Windows PowerShell — nothing to install on the target.
+- `okcode.access.shell.localRunner(dialect)` is a ready `run` that executes the scripts in a local `bash` or `powershell` (tests, or a local folder reached the way a remote one is).
 
 Example — a remote workspace over OpenSSH:
 
 ```js
+const okcode = require('@kedem/okcode');
 const { spawn } = require('child_process');
 const run = (script, stdin) =>
     new Promise((resolve, reject) => {

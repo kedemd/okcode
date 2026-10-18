@@ -9,7 +9,7 @@ const os = require('os');
 const path = require('path');
 const net = require('net');
 const { spawn, execFileSync } = require('child_process');
-const { quote } = require('../../src/access/shell');
+const { quote } = require('../../lib/access/shell');
 
 const SSHD = '/usr/sbin/sshd';
 

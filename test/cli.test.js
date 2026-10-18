@@ -12,10 +12,10 @@ const { spawnSync } = require('child_process');
 const { writeFixture, tmpRoot } = require('./fixtures/code-fixture');
 
 const BIN = path.join(__dirname, '..', 'bin', 'okcode.js');
-// OKCODE_CLI_BIN runs the same cases against another build of the CLI (the Rust rs/okcode-cli binary).
+// OKCODE_CLI_BIN runs the same cases against another build of the CLI (the standalone okcode binary).
 const BIN_CMD = process.env.OKCODE_CLI_BIN ? [process.env.OKCODE_CLI_BIN] : [process.execPath, BIN];
-const HAVE_OKCODE = fs.existsSync(path.join(__dirname, '..', 'src', 'okcode.js'));
-const skip = HAVE_OKCODE ? false : 'src/okcode.js not built yet';
+const HAVE_OKCODE = fs.existsSync(path.join(__dirname, '..', 'lib', 'okcode.js'));
+const skip = HAVE_OKCODE ? false : 'lib/okcode.js is missing';
 
 const atOf = (text) => (/\bat=([0-9A-F]{40})\b/.exec(text) || [])[1] || null;
 
@@ -191,7 +191,7 @@ describe('cli', () => {
         assert.match(disk('lib/math.js'), /by \* v/);
     });
 
-    it('edit-batch: --json batch.json (brain-compatible) and --json receipt', { skip }, () => {
+    it('edit-batch: --json batch.json (the batch file format) and --json receipt', { skip }, () => {
         const at = JSON.parse(run(['read', 'lib/factory.js', '--json']).stdout).at;
         const batch = tmpFile(
             'batch.json',

@@ -10,10 +10,10 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const OKDB = require('@kedem/okdb');
-const { openWorkspace } = require('../src/workspace');
-const { openStore } = require('../src/store');
-const { localFs } = require('../src/access');
-const { createTools, TOOLS } = require('../src/tools');
+const { openWorkspace } = require('../lib/workspace');
+const { openStore } = require('../lib/store');
+const { localFs } = require('../lib/access');
+const { createTools, TOOLS } = require('../lib/tools');
 const { writeFixture, tmpRoot } = require('./fixtures/code-fixture');
 
 const atOf = (text) => (/\bat=([0-9A-F]{40})\b/.exec(text) || [])[1] || null;

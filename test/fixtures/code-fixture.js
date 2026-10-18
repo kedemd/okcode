@@ -7,7 +7,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { localFs, shell } = require('../../src/access');
+const { localFs, shell } = require('../../lib/access');
 const { startSshd, sshdAvailable } = require('../helpers/sshd');
 
 const MATH = [

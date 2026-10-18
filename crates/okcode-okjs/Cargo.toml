@@ -1,0 +1,10 @@
+[package]
+name = "okcode-okjs"
+version = "0.0.1"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde_json = "1"
+rquickjs = { version = "0.14", default-features = false, features = ["std", "array-buffer", "loader"] }
+

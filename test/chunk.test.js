@@ -17,10 +17,10 @@ const {
     CHUNK_MAX,
     MARK,
     MIN_EMBED_CHARS,
-} = require('../src/analysis/chunk');
+} = require('../lib/analysis/chunk');
 
 // A real, comment-dense source file of this package.
-const REAL = fs.readFileSync(path.join(__dirname, '..', 'src', 'analysis', 'parse.js'), 'utf8');
+const REAL = fs.readFileSync(path.join(__dirname, '..', 'lib', 'analysis', 'parse.js'), 'utf8');
 
 describe('chunkCode', () => {
     it('chunks are symbols, not slices of a fixed length', () => {

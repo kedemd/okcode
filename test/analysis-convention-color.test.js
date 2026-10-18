@@ -6,13 +6,13 @@
 // throughout; #22c55e is Tailwind's green-500 and appears nowhere in the
 // repository. A MECHANICALLY TESTABLE convention belongs in the write gate, so
 // the rule reads the palette out of the project every time, and stays blunt
-// without becoming noisy — because the gate judges candidate against
+// without becoming noisy — because the gate checks candidate against
 // baseline and lets through anything that was already there.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { paletteFrom, colorLiterals, rgbOf, nearest } = require('../src/analysis/convention-color');
-const { validateSource, compareDiagnostics } = require('../src/analysis/validate');
+const { paletteFrom, colorLiterals, rgbOf, nearest } = require('../lib/analysis/convention-color');
+const { validateSource, compareDiagnostics } = require('../lib/analysis/validate');
 
 const SHELL = '  --accent: #79c0ff; --green: #3fb950; --amber: #d29922; --red: #f85149; --dim: #6e7681;';
 const PALETTE = paletteFrom([SHELL]);

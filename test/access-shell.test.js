@@ -9,7 +9,7 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { spawnSync } = require('child_process');
-const { shell } = require('../src/access');
+const { shell } = require('../lib/access');
 
 const sha1 = (b) => crypto.createHash('sha1').update(b).digest('hex').toUpperCase();
 const local = shell.localRunner('bash');

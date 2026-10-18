@@ -11,9 +11,9 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const okcode = require('../src/okcode');
-const { localFs, shell } = require('../src/access');
-const { checkPath, pathChecker } = require('../src/access/common');
+const okcode = require('../lib/okcode');
+const { localFs, shell } = require('../lib/access');
+const { checkPath, pathChecker } = require('../lib/access/common');
 
 const ODD = 'd:\\test\\snake\\index.html';
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'okcode-odd-'));

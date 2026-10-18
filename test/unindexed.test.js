@@ -10,9 +10,9 @@ const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
-const okcode = require('../src/okcode');
-const { regions, sectionOf } = require('../src/analysis/chunk');
-const { envNameFor } = require('../src/store');
+const okcode = require('../lib/okcode');
+const { regions, sectionOf } = require('../lib/analysis/chunk');
+const { envNameFor } = require('../lib/store');
 const { writeFixture, tmpRoot } = require('./fixtures/code-fixture');
 
 const MD = [

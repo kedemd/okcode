@@ -10,10 +10,10 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const extensions = require('../src/analysis/extensions');
-const okjs = require('../src/analysis/ext-okjs');
-const { extract } = require('../src/analysis/parse');
-const { validateSource } = require('../src/analysis/validate');
+const extensions = require('../lib/analysis/extensions');
+const okjs = require('../lib/analysis/ext-okjs');
+const { extract } = require('../lib/analysis/parse');
+const { validateSource } = require('../lib/analysis/validate');
 
 let hasTooling = true;
 try {
@@ -159,9 +159,9 @@ test(
     },
 );
 
-// F4 item 1: the component tag used to be the ONLY symbol a `.ok.js` file
+// The component tag used to be the ONLY symbol a `.ok.js` file
 // produced — `find('mount')` had no symbol to reach, only grep/FTS. Now the
-// generic acorn extractor ALSO runs, and its symbols for the member functions
+// generic JS extractor ALSO runs, and its symbols for the member functions
 // nest under the tag (`x-card.mount`), while a helper declared OUTSIDE the
 // `export default {...}` stays top-level, exactly as it would in plain JS.
 const CARD_WITH_HELPER = [

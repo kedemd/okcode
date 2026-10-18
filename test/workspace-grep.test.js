@@ -10,11 +10,11 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const OKDB = require('@kedem/okdb');
-const { openWorkspace } = require('../src/workspace');
-const { openStore } = require('../src/store');
-const { localFs, shell } = require('../src/access');
-const { createTools } = require('../src/tools');
-const { globToRegExp, pathMatcher, compileMatcher, matchText, tallyText, indexTerms } = require('../src/grep');
+const { openWorkspace } = require('../lib/workspace');
+const { openStore } = require('../lib/store');
+const { localFs, shell } = require('../lib/access');
+const { createTools } = require('../lib/tools');
+const { globToRegExp, pathMatcher, compileMatcher, matchText, tallyText, indexTerms } = require('../lib/grep');
 const { writeFixture, tmpRoot } = require('./fixtures/code-fixture');
 
 // Files on top of the shared fixture: several matches per file, a test file,

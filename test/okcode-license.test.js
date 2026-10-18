@@ -18,7 +18,7 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 const { generateKeyPairSync, createHash, sign: cryptoSign } = require('node:crypto');
 const OKDB = require('@kedem/okdb');
-const okcode = require('../src/okcode');
+const okcode = require('../lib/okcode');
 const { tmpRoot, writeFixture } = require('./fixtures/code-fixture');
 
 function devSources() {

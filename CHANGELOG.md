@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- The package's JavaScript moved from `src/` to `lib/` (`main` is `lib/okcode.js`). `require('@kedem/okcode')` is
+  unchanged; deep requires change path (`@kedem/okcode/src/tools` is now `@kedem/okcode/lib/tools`).
+- The bash/PowerShell access scripts are no longer shipped as files: they were already compiled into the native addon.
+- New [docs/NATIVE.md](docs/NATIVE.md): the addon, the standalone binary, and how okcode reaches okdb through its C
+  bridge. The README documents every export and CLI command; the docs are corrected for 1.0's behaviour.
+- Repository: the Cargo workspace is at the root with the crates in `crates/`; the JS-era leftovers (vendored `.wasm`
+  grammars, the grammar vendoring script, the JS benchmark, the recorded test corpus) are gone.
+
 ## [1.0.0] - 2026-10-18
 
 okcode 1.0 is a native implementation of okcode 0.2: the same JavaScript API (`require('@kedem/okcode')`, `open`,

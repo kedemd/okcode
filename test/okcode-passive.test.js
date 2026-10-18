@@ -11,10 +11,10 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const { fork } = require('child_process');
-const okcode = require('../src/okcode');
+const okcode = require('../lib/okcode');
 
 const FAKE = { type: 'fake', model: 'fake-v1', dims: 16 };
-const FAKE_PIPELINE = require('../src/identity').pipelineName({ type: 'fake', endpoint: '', model: 'fake-v1' }, 16);
+const FAKE_PIPELINE = require('./helpers/identity').pipelineName({ type: 'fake', endpoint: '', model: 'fake-v1' }, 16);
 
 async function passiveChild(store) {
     const oc = await okcode.open({ path: store, role: { processors: false, engines: false } });

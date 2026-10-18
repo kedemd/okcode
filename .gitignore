@@ -1,8 +1,7 @@
 node_modules
 *.log
 .okcode-test*/
-rs/target/
-rs/okcode-node/*.node
+/target/
+/.cargo/config.toml
 /native/
 /dist/
-/rs/.cargo/config.toml

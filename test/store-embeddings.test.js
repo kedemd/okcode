@@ -10,12 +10,12 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const OKDB = require('@kedem/okdb');
-const { openWorkspace } = require('../src/workspace');
-const { openStore, envNameFor } = require('../src/store');
-const { localFs } = require('../src/access');
+const { openWorkspace } = require('../lib/workspace');
+const { openStore, envNameFor } = require('../lib/store');
+const { localFs } = require('../lib/access');
 const { writeFixture, tmpRoot } = require('./fixtures/code-fixture');
-const { pipelineName } = require('../src/identity');
-// A pipeline's name for an identity (src/identity.js).
+const { pipelineName } = require('./helpers/identity');
+// A pipeline's name for an identity (lib/identity.js).
 const pn = (type, model, dims, endpoint = '') => pipelineName({ type, endpoint, model }, dims);
 
 const CONCEPTS = {

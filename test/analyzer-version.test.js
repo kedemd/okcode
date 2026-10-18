@@ -3,14 +3,14 @@
 // warm reopen re-ingests a row only when that version moved. Two failure
 // modes this guards: a row stamped with nothing (or a version that can never
 // match) re-parses on EVERY open; a row from an older extractor is trusted
-// forever and silently lacks what the new one extracts (F3's call sites).
+// forever and silently lacks what the new one extracts (e.g. call sites).
 
 const { describe, it, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
-const okcode = require('../src/okcode');
-const { extract, analyzerVersionFor } = require('../src/analysis/parse');
+const okcode = require('../lib/okcode');
+const { extract, analyzerVersionFor } = require('../lib/analysis/parse');
 const { tmpRoot } = require('./fixtures/code-fixture');
 
 const { localFs } = okcode.access;

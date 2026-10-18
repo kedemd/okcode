@@ -10,9 +10,9 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const OKDB = require('@kedem/okdb');
-const { openWorkspace } = require('../src/workspace');
-const { openStore, envNameFor, quoteLines } = require('../src/store');
-const { localFs } = require('../src/access');
+const { openWorkspace } = require('../lib/workspace');
+const { openStore, envNameFor, quoteLines } = require('../lib/store');
+const { localFs } = require('../lib/access');
 const { writeFixture, FIXTURE_FILES, tmpRoot, counted } = require('./fixtures/code-fixture');
 
 // A phrase that only ever exists in a workspace file. Its WORDS may be FTS
@@ -37,7 +37,7 @@ function storeBytes(dir) {
 describe('envNameFor', () => {
     it('is okcode_<slug>, never contains ":" or a leading "~", and never collides', () => {
         assert.equal(envNameFor('app'), 'okcode_app');
-        for (const id of ['App', 'a.b', 'a_b', 'my:ws', '~tilde', 'D:/project/brain', 'x'.repeat(200), 'ünï']) {
+        for (const id of ['App', 'a.b', 'a_b', 'my:ws', '~tilde', 'D:/project/app', 'x'.repeat(200), 'ünï']) {
             const n = envNameFor(id);
             assert.match(n, /^okcode_[a-z0-9_]+$/, n);
             assert.ok(n.length <= 60, n);

@@ -9,12 +9,12 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const OKDB = require('@kedem/okdb');
-const okcode = require('../src/okcode');
-const { envNameFor } = require('../src/store');
+const okcode = require('../lib/okcode');
+const { envNameFor } = require('../lib/store');
 const { localFs } = okcode.access;
 const { writeFixture, FIXTURE_FILES, tmpRoot, counted } = require('./fixtures/code-fixture');
-const { pipelineName } = require('../src/identity');
-// A pipeline's name for an identity (src/identity.js).
+const { pipelineName } = require('./helpers/identity');
+// A pipeline's name for an identity (lib/identity.js).
 const pn = (type, model, dims, endpoint = '') => pipelineName({ type, endpoint, model }, dims);
 
 // okdb's built-in 'fake' embedder: deterministic, no network, no function —

@@ -1,11 +1,11 @@
 'use strict';
 // The candidate validator — acorn plus `node --check`, on TEXT, never a
 // path. Every case here runs with no fixture on disk at all: that is the
-// whole point, a candidate is judged before anything is touched.
+// whole point, a candidate is checked before anything is touched.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { validateSource, validateSourceAsync, compareDiagnostics } = require('../src/analysis/validate');
+const { validateSource, validateSourceAsync, compareDiagnostics } = require('../lib/analysis/validate');
 
 // Named, not counted: template-balance runs alongside the two JS validators,
 // and these assertions are about the JS pair.

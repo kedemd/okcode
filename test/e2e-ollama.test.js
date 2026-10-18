@@ -8,8 +8,8 @@
 // with OKCODE_E2E_MODEL (default qwen3-embedding:latest). Slow by design
 // (minutes): it embeds a few hundred chunks.
 //
-// The corpus is a COPY of okcode's own src/ (the "remote" workspace is a copy
-// of just src/access) — self-contained, so the test runs the same against a
+// The corpus is a COPY of okcode's own lib/ (the "remote" workspace is a copy
+// of just lib/access) — self-contained, so the test runs the same against a
 // linked, built or published okdb. Edits land on the copy, never on a real
 // repo. The name/text/meaning targets below are okcode code with a stable
 // purpose (identity hashing, the base64 shell transfer, the stale-edit check);
@@ -20,13 +20,13 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const okcode = require('../src/okcode');
-const { createTools } = require('../src/tools');
+const okcode = require('../lib/okcode');
+const { createTools } = require('../lib/tools');
 const { startSshd } = require('./helpers/sshd');
 
 const OLLAMA = process.env.OLLAMA_URL || 'http://localhost:11434';
 const MODEL = process.env.OKCODE_E2E_MODEL || 'qwen3-embedding:latest';
-const CORPUS = path.join(__dirname, '..', 'src');
+const CORPUS = path.join(__dirname, '..', 'lib');
 
 async function ollamaReady() {
     try {

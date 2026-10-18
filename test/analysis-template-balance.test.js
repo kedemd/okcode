@@ -10,8 +10,8 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const tb = require('../src/analysis/template-balance');
-const validate = require('../src/analysis/validate');
+const tb = require('../lib/analysis/template-balance');
+const validate = require('../lib/analysis/validate');
 
 const codes = (text) => tb.check(text).map((d) => `${d.code}:${d.name}`);
 

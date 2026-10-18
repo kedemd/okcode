@@ -12,9 +12,9 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const OKDB = require('@kedem/okdb');
-const okcode = require('../src/okcode');
-const { createTools } = require('../src/tools');
-const { pipelineName } = require('../src/identity');
+const okcode = require('../lib/okcode');
+const { createTools } = require('../lib/tools');
+const { pipelineName } = require('./helpers/identity');
 const { localFs } = okcode.access;
 const { writeFixture, tmpRoot } = require('./fixtures/code-fixture');
 

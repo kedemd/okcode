@@ -10,11 +10,11 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const OKDB = require('@kedem/okdb');
-const okcode = require('../src/okcode');
+const okcode = require('../lib/okcode');
 const { localFs } = okcode.access;
 const { writeFixture, tmpRoot } = require('./fixtures/code-fixture');
-const { pipelineName } = require('../src/identity');
-// A pipeline's name for an identity (src/identity.js).
+const { pipelineName } = require('./helpers/identity');
+// A pipeline's name for an identity (lib/identity.js).
 const pn = (type, model, dims, endpoint = '') => pipelineName({ type, endpoint, model }, dims);
 
 // A bag of words with a tiny synonym table (as in store-embeddings): enough
@@ -309,7 +309,7 @@ describe('embedder profiles', () => {
     });
 
     it("translation: a string key goes to okdb as api_key, never into okcode's record; functions never persist", () => {
-        const emb = require('../src/embedders');
+        const emb = require('../lib/embedders');
         const registered = [];
         const fakeDb = {
             embeddings: {

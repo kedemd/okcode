@@ -1,7 +1,6 @@
 'use strict';
-// Freshness (docs/DESIGN.md §6), ported from the brain's
-// test/codeindex-freshness.js: reads never walk the tree, and the graph changes
-// only at explicit sync points —
+// Freshness (docs/DESIGN.md §6): reads never walk the tree, and the graph
+// changes only at explicit sync points —
 //
 //   - OPEN and sync() are the only paths that call the facade's list();
 //   - a plain lookup after open never lists;
@@ -18,7 +17,7 @@ const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
-const { openWorkspace } = require('../src/workspace');
+const { openWorkspace } = require('../lib/workspace');
 const { tmpRoot, facades, counted } = require('./fixtures/code-fixture');
 
 for (const fac of facades()) {
@@ -133,7 +132,7 @@ for (const fac of facades()) {
             // isTextual() returned `undefined` for a non-text path, and the re-stale check compared
             // it with `!==` against the stored row's boolean — so every opaque file (images, fonts,
             // .gitkeep) counted as changed and was re-written on EVERY sync (13 of them, every
-            // ~12 s, in a live brain workspace).
+            // ~12 s, in a live workspace).
             const { ws, write } = await fixture();
             write('logo.png', Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 1, 2, 3]));
             write('.gitkeep', '');

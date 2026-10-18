@@ -10,7 +10,7 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { spawnSync } = require('child_process');
-const { localFs, shell } = require('../src/access');
+const { localFs, shell } = require('../lib/access');
 const { startSshd, sshdAvailable } = require('./helpers/sshd');
 
 const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
@@ -433,17 +433,17 @@ describe('shell (powershell, local runner)', { skip: pwshBin ? false : 'pwsh not
 // its sibling (or without common.js's PRUNE_DOT_DIRS) would pass the
 // contract test above and still silently diverge on an actual project.
 describe('PRUNE_DOT_DIRS: common.js, bash list.sh and PowerShell list.ps1 agree exactly', () => {
-    const { PRUNE_DOT_DIRS } = require('../src/access/common');
+    const { PRUNE_DOT_DIRS } = require('../lib/access/common');
 
     function namesFromBash() {
-        const text = fs.readFileSync(path.join(__dirname, '../src/access/scripts/bash/list.sh'), 'utf8');
+        const text = fs.readFileSync(path.join(__dirname, '../crates/okcode-access/scripts/bash/list.sh'), 'utf8');
         const m = /^dotprune=\(([^)]*)\)/m.exec(text);
         assert.ok(m, 'list.sh must define dotprune=(...)');
         return m[1].trim().split(/\s+/);
     }
 
     function namesFromPowershell() {
-        const text = fs.readFileSync(path.join(__dirname, '../src/access/scripts/powershell/list.ps1'), 'utf8');
+        const text = fs.readFileSync(path.join(__dirname, '../crates/okcode-access/scripts/powershell/list.ps1'), 'utf8');
         const m = /\$dotPrune\s*=\s*@\(([^)]*)\)/m.exec(text);
         assert.ok(m, 'list.ps1 must define $dotPrune = @(...)');
         return [...m[1].matchAll(/'([^']*)'/g)].map((x) => x[1]);

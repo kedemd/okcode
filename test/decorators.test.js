@@ -13,10 +13,9 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const OKDB = require('@kedem/okdb');
-const { openWorkspace } = require('../src/workspace');
-const { openStore } = require('../src/store');
-const { localFs } = require('../src/access');
-const treesitter = require('../src/analysis/treesitter');
+const { openWorkspace } = require('../lib/workspace');
+const { openStore } = require('../lib/store');
+const { localFs } = require('../lib/access');
 
 function tmpRoot() {
     const base = fs.mkdtempSync(path.join(os.tmpdir(), 'okcode-decorators-'));
@@ -30,11 +29,6 @@ describe('decorators/attributes belong to the symbol they decorate', () => {
         for (const c of cleanups) await c().catch(() => {});
     });
 
-    before(async () => {
-        await Promise.all(
-            ['typescript', 'python', 'rust', 'php', 'java', 'csharp', 'cpp'].map((id) => treesitter.ensureLanguage(id)),
-        );
-    });
 
     async function setup(files) {
         const { base, root } = tmpRoot();

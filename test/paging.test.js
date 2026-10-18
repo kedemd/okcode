@@ -10,8 +10,8 @@ const { describe, it, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
-const { openWorkspace } = require('../src/workspace');
-const { localFs } = require('../src/access');
+const { openWorkspace } = require('../lib/workspace');
+const { localFs } = require('../lib/access');
 const { tmpRoot } = require('./fixtures/code-fixture');
 
 describe('paging: refs/find/mentions/importers never cut silently', () => {
@@ -30,7 +30,7 @@ describe('paging: refs/find/mentions/importers never cut silently', () => {
     it('refs: the ranked total is exact past the OLD hardCap (limit*20, default 800), and local ranks before textual noise', async () => {
         const { root } = tmpRoot('refs-cap');
         fs.mkdirSync(root, { recursive: true });
-        // A real definition + one real use — F3 ranks this `local`, ahead of
+        // A real definition + one real use — refs ranks this `local`, ahead of
         // every textual mention below.
         fs.writeFileSync(
             path.join(root, 'def.js'),

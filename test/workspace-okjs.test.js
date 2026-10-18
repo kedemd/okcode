@@ -1,5 +1,5 @@
 'use strict';
-// F4 item 1 + 2, at the workspace surface: a component's members are
+// okjs components at the workspace surface: a component's members are
 // findable by name (`find('refresh')` reaches `setting-group.context.
 // refresh`), readable by path (`read('file#tag.member')`), and the piecewise
 // outline still offers the template/style regions it always did — all
@@ -13,8 +13,8 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { localFs } = require('../src/access');
-const okcode = require('../src/okcode');
+const { localFs } = require('../lib/access');
+const okcode = require('../lib/okcode');
 
 let hasTooling = true;
 try {

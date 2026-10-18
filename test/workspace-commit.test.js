@@ -3,15 +3,15 @@
 // The facade is the real localFs with ONE step wrapped — the commit, or the
 // readback that follows it — so a fault lands in exactly one step of a real
 // editBatch() on a real fixture, rather than the thing being proven being
-// mocked away. (Ported from the brain's fakeIndex() cases; on the async facade
-// there is no script-sniffing needed to find the commit.)
+// mocked away. (On the async facade there is no script-sniffing needed to
+// find the commit.)
 
 const { describe, it, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
-const { openWorkspace, classifyCommit } = require('../src/workspace');
-const { localFs } = require('../src/access');
+const { openWorkspace, classifyCommit } = require('../lib/workspace');
+const { localFs } = require('../lib/access');
 const { writeFixture, tmpRoot } = require('./fixtures/code-fixture');
 
 const bases = [];

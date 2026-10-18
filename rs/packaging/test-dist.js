@@ -29,7 +29,8 @@ const m = /tests: pass (\d+) fail (\d+)/.exec(s.stdout);
 const cli = /cli\.test\.js: # pass (\d+) # fail (\d+)/.exec(s.stdout);
 const diff = /cli-diff: (\d+)\/(\d+)/.exec(s.stdout);
 // the one accepted failure: analysis-treesitter's injected-loader test (no JS grammar loader exists in the native build)
-const accepted = (s.stdout.match(/fail [1-9]/g) || []).length <= 1 && /analysis-treesitter: pass \d+\/\d+ fail 1 /.test(s.stdout);
+const failing = s.stdout.split('\n').filter((l) => /^\s+[\w.-]+: pass \d+\/\d+ fail [1-9]/.test(l));
+const accepted = failing.length === 1 && /analysis-treesitter: pass \d+\/\d+ fail 1 /.test(failing[0]);
 if (s.status !== 0 || !m || (Number(m[2]) > 1) || (Number(m[2]) === 1 && !accepted)) die('the suite failed');
 if (!cli || cli[2] !== '0' || !diff || diff[1] !== diff[2]) die('the CLI checks failed');
 

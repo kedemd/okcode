@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-10-19
+
 **Fixes**
 
 - `analysis.registerExtension` / `registerExtractor` drive workspace indexing again, as in 0.2: a textual path a host

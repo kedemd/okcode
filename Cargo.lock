@@ -628,7 +628,6 @@ version = "0.0.1"
 dependencies = [
  "base64",
  "libc",
- "okcode-golden",
  "serde_json",
  "sha1",
 ]
@@ -641,7 +640,6 @@ dependencies = [
  "okcode-chunk",
  "okcode-edges",
  "okcode-embed",
- "okcode-golden",
  "okcode-grep",
  "okcode-js",
  "okcode-okjs",
@@ -654,7 +652,6 @@ dependencies = [
 name = "okcode-chunk"
 version = "0.0.1"
 dependencies = [
- "okcode-golden",
  "oxc_allocator",
  "oxc_ast",
  "oxc_parser",
@@ -689,7 +686,6 @@ dependencies = [
 name = "okcode-edges"
 version = "0.0.1"
 dependencies = [
- "okcode-golden",
  "regex",
  "serde_json",
 ]
@@ -698,18 +694,9 @@ dependencies = [
 name = "okcode-embed"
 version = "0.0.1"
 dependencies = [
- "okcode-golden",
  "serde_json",
  "sha1",
  "ureq",
-]
-
-[[package]]
-name = "okcode-golden"
-version = "0.0.1"
-dependencies = [
- "flate2",
- "serde_json",
 ]
 
 [[package]]
@@ -717,7 +704,6 @@ name = "okcode-grep"
 version = "0.0.1"
 dependencies = [
  "fancy-regex",
- "okcode-golden",
  "serde_json",
 ]
 
@@ -725,7 +711,6 @@ dependencies = [
 name = "okcode-js"
 version = "0.0.1"
 dependencies = [
- "okcode-golden",
  "oxc_allocator",
  "oxc_ast",
  "oxc_ast_visit",
@@ -759,7 +744,6 @@ dependencies = [
 name = "okcode-okjs"
 version = "0.0.1"
 dependencies = [
- "okcode-golden",
  "rquickjs",
  "serde_json",
 ]
@@ -769,7 +753,6 @@ name = "okcode-text"
 version = "0.0.1"
 dependencies = [
  "base64",
- "okcode-golden",
  "regex",
  "serde_json",
 ]
@@ -778,7 +761,6 @@ dependencies = [
 name = "okcode-treesitter"
 version = "0.0.1"
 dependencies = [
- "okcode-golden",
  "regex",
  "serde_json",
  "tree-sitter",

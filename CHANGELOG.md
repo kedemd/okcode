@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-10-19
+
 **Changes**
 
 - Requires `@kedem/okdb` ^3.0.1, which fixes the FTS registration that a removed environment left behind. okcode's

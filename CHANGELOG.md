@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+**Changes**
+
+- Requires `@kedem/okdb` ^3.0.1, which fixes the FTS registration that a removed environment left behind. okcode's
+  workaround for it in 1.0.1 (dropping the stale index when a recreated environment's `fts.ensure` was refused) is
+  removed; `oc.reset(id, { scope: 'all' })` keeps full-text search on through okdb itself.
+
 ## [1.0.1] - 2026-10-19
 
 **Fixes**

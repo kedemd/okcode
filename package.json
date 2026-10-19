@@ -29,7 +29,7 @@
         "node": ">=20"
     },
     "dependencies": {
-        "@kedem/okdb": "^3.0.0"
+        "@kedem/okdb": "^3.0.1"
     },
     "license": "MIT",
     "devDependencies": {

@@ -109,7 +109,7 @@ impl Bridge {
         if st != ffi::OKDB_OK {
             return Err(self.take_err(st, err, err_len));
         }
-        Ok(Handle { b: self.clone(), h, owner_thread, host: std::sync::Mutex::new(None) })
+        Ok(Handle { b: self.clone(), h, owner_thread })
     }
 
     /// Attach to a JS host's instance (`db._native.bridgeHandle()`), ON THAT INSTANCE'S JS THREAD. close() only detaches.
@@ -119,7 +119,7 @@ impl Bridge {
         if st != ffi::OKDB_OK {
             return Err(self.take_err(st, err, err_len));
         }
-        Ok(Handle { b: self.clone(), h, owner_thread: false, host: std::sync::Mutex::new(None) })
+        Ok(Handle { b: self.clone(), h, owner_thread: false })
     }
 
     /// Run okdb's CLI in this process (`okdb …`).
@@ -172,7 +172,6 @@ pub struct Handle {
     h: u64,
     /// opened with OKDB_OPEN_OWNER_THREAD: dispatch from any thread is fine (okdb forwards)
     pub owner_thread: bool,
-    host: std::sync::Mutex<Option<Box<HostBox>>>,
 }
 
 unsafe impl Send for Handle {}
@@ -282,22 +281,23 @@ impl Handle {
 
     /// Install okcode's callback host for this handle's owner thread (replaces a previous one).
     pub fn set_host(&self, host: Arc<dyn Host>) -> Result<()> {
-        let boxed = Box::new(HostBox { host });
+        // okdb owns ctx from here: it may still release callback ids after this handle is gone (its
+        // thread-locals drop at process exit), so ctx is freed only by `drop`, okdb's "no call follows".
+        let ctx = Box::into_raw(Box::new(HostBox { host }));
         let vt = ffi::OkdbBridgeHostV1 {
             struct_size: std::mem::size_of::<ffi::OkdbBridgeHostV1>() as u32,
             reserved: 0,
-            ctx: &*boxed as *const HostBox as *mut c_void,
+            ctx: ctx as *mut c_void,
             call: host_call,
             release: Some(host_release),
             free_reply: Some(host_free),
-            drop: None,
+            drop: Some(host_drop),
         };
         let st = unsafe { (self.b.t.set_host)(self.h, &vt) };
         if st != ffi::OKDB_OK {
+            drop(unsafe { Box::from_raw(ctx) });
             return Err(BridgeError::new(st, "SET_HOST_FAILED", "okdb refused the callback host"));
         }
-        // keep ctx alive as long as okdb may call it (replaced on the next set_host, freed with the handle)
-        *self.host.lock().unwrap_or_else(|e| e.into_inner()) = Some(boxed);
         Ok(())
     }
 
@@ -357,6 +357,10 @@ unsafe extern "C" fn host_call(ctx: *mut c_void, op: *const c_char, args: *const
 unsafe extern "C" fn host_release(ctx: *mut c_void, id: u64) {
     let hb = &*(ctx as *const HostBox);
     hb.host.release(id);
+}
+
+unsafe extern "C" fn host_drop(ctx: *mut c_void) {
+    drop(Box::from_raw(ctx as *mut HostBox));
 }
 
 unsafe extern "C" fn host_free(_ctx: *mut c_void, ptr: *mut u8, len: usize) {

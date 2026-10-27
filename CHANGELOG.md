@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+**Fixes**
+
+- A process that opened okcode's store and indexed a workspace no longer dies with SIGSEGV at exit after `close()`.
+  okcode freed the callback context it had handed to okdb while okdb could still release callbacks through it (okdb
+  drops them in thread-locals at process exit); okdb now owns that context and frees it through the bridge's `drop`.
+
 **Changes**
 
 - `ws.ask()` says when its semantic eye is still building: until the profile's indexer has embedded every file it was

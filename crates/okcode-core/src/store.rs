@@ -1580,18 +1580,7 @@ impl Store {
         self.retry_pending();
         let mut out = Vec::new();
         for p in self.snapshot_profiles() {
-            let mut status = Value::Null;
-            if let Some(scoped) = &p.scoped {
-                status = match self.api_call("indexer", scoped, "stats", vec![]) {
-                    Ok(Some(v)) => v,
-                    Ok(None) => match self.emb("embeddings", None, "durableStats", vec![json!(scoped)]) {
-                        Ok(v) => v,
-                        Err(e) if not_implemented(&e) => Value::Null,
-                        Err(e) => json!({ "error": e.message }),
-                    },
-                    Err(err) => json!({ "error": err.message }),
-                };
-            }
+            let status = p.scoped.as_deref().map_or(Value::Null, |scoped| self.indexer_status(scoped));
             let nz = |s: &str| if s.is_empty() { Value::Null } else { json!(s) };
             out.push(json!({
                 "name": p.name,
@@ -1607,6 +1596,29 @@ impl Store {
             }));
         }
         Ok(out)
+    }
+
+    /// A pipeline's indexer progress: live where this process runs it, durable otherwise.
+    fn indexer_status(&self, scoped: &str) -> Value {
+        match self.api_call("indexer", scoped, "stats", vec![]) {
+            Ok(Some(v)) => v,
+            Ok(None) => match self.emb("embeddings", None, "durableStats", vec![json!(scoped)]) {
+                Ok(v) => v,
+                Err(e) if not_implemented(&e) => Value::Null,
+                Err(e) => json!({ "error": e.message }),
+            },
+            Err(err) => json!({ "error": err.message }),
+        }
+    }
+
+    /// How far the profile ask() would use has embedded the files it was handed:
+    /// `{ done, pending }` while it is still behind, None once it has caught up (or can't say).
+    pub fn building(&self, profile: Option<&str>) -> Option<Value> {
+        let scoped = self.profile_for(profile)?.scoped?;
+        let counts = self.indexer_status(&scoped).get("doc_counts").cloned()?;
+        let n = |k: &str| counts.get(k).and_then(Value::as_u64).unwrap_or(0);
+        let (done, pending) = (n("done"), n("pending"));
+        (pending > 0).then(|| json!({ "done": done, "pending": pending }))
     }
 
     /// Wait for a profile's indexer to drain what it has been handed. For a test, a CLI run or a

@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+**Changes**
+
+- `ws.ask()` says when its semantic eye is still building: until the profile's indexer has embedded every file it was
+  handed, the result carries `vectorsBuilding: { done, pending }`, and `code_ask` adds a line saying the answer leans
+  on names and text. Vectors are embedded in the background after a workspace is indexed, so an `ask()` right after
+  `addWorkspace` used to return a lexical answer that looked the same as a semantic one.
+
 ## [1.0.2] - 2026-10-19
 
 **Changes**

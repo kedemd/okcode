@@ -1004,12 +1004,23 @@ impl<'a> Cx<'a> {
             })
             .collect();
         let head = if q.is_empty() { "a query vector".to_string() } else { format!("\"{q}\"") };
+        let building = get(h.props, "vectorsBuilding");
         Ok(format!(
-            "Answering {head} from {}:\n{}{}{}",
+            "Answering {head} from {}:\n{}{}{}{}",
             self.id(),
             rows.join("\n"),
             if truthy(get(h.props, "truncated")) { format!("\n  [top {} match(es) — raise limit to search deeper]", h.items.len()) } else { String::new() },
-            if truthy(get(h.props, "contentEyeSkipped")) { format!("\n  [{} is indexed fts: symbols — no file-text eye; names/doc/meaning only]", self.id()) } else { String::new() }
+            if truthy(get(h.props, "contentEyeSkipped")) { format!("\n  [{} is indexed fts: symbols — no file-text eye; names/doc/meaning only]", self.id()) } else { String::new() },
+            if truthy(building) {
+                let n = |k: &str| building.get(k).and_then(Value::as_u64).unwrap_or(0);
+                format!(
+                    "\n  [meaning is still being indexed ({} of {} files embedded) — this answer leans on names and text; ask again later for a fuller one]",
+                    n("done"),
+                    n("done") + n("pending")
+                )
+            } else {
+                String::new()
+            }
         ))
     }
 

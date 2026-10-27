@@ -575,6 +575,11 @@ impl Workspace {
         if !store.content_fts() {
             props.insert("contentEyeSkipped".into(), json!(true));
         }
+        // Vectors are embedded in the background: a workspace asked before they caught up gets a
+        // mostly (or wholly) lexical answer, and must be able to tell.
+        if let Some(b) = store.building(o.profile.as_deref()) {
+            props.insert("vectorsBuilding".into(), b);
+        }
         Ok(with_props(out, Value::Object(props)))
     }
 

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.0.4] - 2026-11-18
+
 **Changes**
 
 - Requires `@kedem/okdb` ^3.2.0. Its vector search runs okdb's new index (an HNSW graph stored next to the vectors, read in

@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+**Changes**
+
+- Requires `@kedem/okdb` ^3.2.0. Its vector search runs okdb's new index (an HNSW graph stored next to the vectors, read in
+  place): far less memory with the index loaded, new vectors searchable at once in every process, recall at least as good.
+  The first start of each workspace store builds the index once in the background (searches answer meanwhile, slower), and
+  full-text search sees a new write at once. Nothing changes in okcode's API.
+
 ## [1.0.3] - 2026-10-27
 
 **Fixes**
